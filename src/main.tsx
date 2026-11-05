@@ -18,13 +18,20 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           Header() {
             return (
               <div className="amplify-auth-brand-header">
-                <div className="amplify-auth-logo">G6</div>
-                <div>
+                <div className="amplify-auth-logo-wrap">
+                  <img
+                    src="/epanet-logo.svg"
+                    alt="EPANET Logo"
+                    className="amplify-auth-epanet-logo"
+                  />
+                </div>
+                <div className="amplify-auth-header-text">
+                  <div className="amplify-auth-badge">EPA WATER NETWORK STUDIO</div>
                   <div className="amplify-auth-title">
-                    EPANET-Auto · GPT-6 Sol
+                    EPANET MODEL BUILDER
                   </div>
                   <div className="amplify-auth-subtitle">
-                    AWS Amplify Login · Amazon Bedrock (openai.gpt-6-sol)
+                    Hydraulic Modeling &amp; AWS Bedrock AI (openai.gpt-6-sol)
                   </div>
                 </div>
               </div>

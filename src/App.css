@@ -1212,40 +1212,61 @@
 .amplify-auth-brand-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 18px 20px 14px;
-  margin-bottom: 10px;
-  border-radius: 12px;
-  background-color: #18181b;
-  border: 1px solid #2e2e36;
+  gap: 14px;
+  padding: 18px 22px;
+  margin-bottom: 12px;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #132332 0%, #161b22 100%);
+  border: 1px solid rgba(56, 189, 248, 0.35);
   color: #f4f4f6;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 
-.amplify-auth-logo {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, #10a37f 0%, #059669 100%);
+.amplify-auth-logo-wrap {
+  width: 58px;
+  height: 58px;
+  border-radius: 14px;
+  background: rgba(14, 165, 233, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.4);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
-  font-size: 1rem;
-  color: #ffffff;
   flex-shrink: 0;
+  padding: 4px;
+}
+
+.amplify-auth-epanet-logo {
+  width: 50px;
+  height: 50px;
+  object-fit: contain;
+  display: block;
+}
+
+.amplify-auth-header-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.amplify-auth-badge {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #38bdf8;
 }
 
 .amplify-auth-title {
-  font-size: 1.02rem;
-  font-weight: 700;
+  font-size: 1.2rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
   color: #ffffff;
 }
 
 .amplify-auth-subtitle {
   font-size: 0.78rem;
   color: #a7f3d0;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 .user-auth-pill {
