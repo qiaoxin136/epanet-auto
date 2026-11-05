@@ -26,12 +26,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
                   />
                 </div>
                 <div className="amplify-auth-header-text">
-                  <div className="amplify-auth-badge">EPA WATER NETWORK STUDIO</div>
                   <div className="amplify-auth-title">
                     EPANET MODEL BUILDER
-                  </div>
-                  <div className="amplify-auth-subtitle">
-                    Hydraulic Modeling &amp; AWS Bedrock AI (openai.gpt-6-sol)
                   </div>
                 </div>
               </div>

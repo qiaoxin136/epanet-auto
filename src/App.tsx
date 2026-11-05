@@ -965,7 +965,7 @@ function App({ user, signOut }: AppProps) {
               <span className="engine-title">{BEDROCK_ENGINE_CONFIG.modelName}</span>
               <span className="engine-code">{BEDROCK_ENGINE_CONFIG.modelId}</span>
             </div>
-            <div className="engine-card-row" style={{ color: "#9ca3af" }}>
+            <div className="engine-card-row" style={{ color: "#64748b" }}>
               <span>Inference Profile</span>
               <code>{BEDROCK_ENGINE_CONFIG.inferenceProfileId}</code>
             </div>
@@ -994,7 +994,7 @@ function App({ user, signOut }: AppProps) {
         {isDraggingPic && (
           <div className="pic-drop-overlay">
             <span>🖼️ Drop picture file here to attach to GPT-6 Sol conversation</span>
-            <span style={{ fontSize: "0.82rem", color: "#a7f3d0" }}>
+            <span style={{ fontSize: "0.82rem", color: "#047857" }}>
               Supports PNG, JPG, WEBP, GIF, SVG, BMP
             </span>
           </div>
@@ -1285,7 +1285,7 @@ function App({ user, signOut }: AppProps) {
               <span>💧 Water System Studio</span>
               <span className="agent-badge">build-epanet</span>
             </div>
-            <span style={{ fontSize: "0.73rem", color: "#9ca3af" }}>
+            <span style={{ fontSize: "0.73rem", color: "#64748b" }}>
               {loadedLayersCount}/7 layers
             </span>
           </div>
@@ -1328,7 +1328,7 @@ function App({ user, signOut }: AppProps) {
                 href={DEM_DOWNLOAD_URL}
                 target="_blank"
                 rel="noopener noreferrer"
-                style={{ fontSize: "0.73rem", color: "#60a5fa" }}
+                style={{ fontSize: "0.73rem", color: "#0284c7" }}
               >
                 Open DEM Portal ↗
               </a>
@@ -1374,7 +1374,7 @@ function App({ user, signOut }: AppProps) {
                 justifyContent: "space-between",
                 alignItems: "center",
                 fontSize: "0.72rem",
-                color: demFolder.trim() ? "#34d399" : "#f87171",
+                color: demFolder.trim() ? "#059669" : "#dc2626",
               }}
             >
               <span>
@@ -1482,7 +1482,7 @@ function App({ user, signOut }: AppProps) {
                 justifyContent: "space-between",
                 alignItems: "center",
                 fontSize: "0.72rem",
-                color: waterJsonFolder.trim() ? "#34d399" : "#f87171",
+                color: waterJsonFolder.trim() ? "#059669" : "#dc2626",
               }}
             >
               <span>
@@ -1497,13 +1497,13 @@ function App({ user, signOut }: AppProps) {
             </div>
 
             {folderScanStatus && (
-              <div style={{ fontSize: "0.72rem", color: "#6ee7b7" }}>
+              <div style={{ fontSize: "0.72rem", color: "#059669" }}>
                 ✓ {folderScanStatus}
               </div>
             )}
 
             {uploadError && (
-              <div style={{ fontSize: "0.74rem", color: "#f87171" }}>
+              <div style={{ fontSize: "0.74rem", color: "#dc2626" }}>
                 ⚠ {uploadError}
               </div>
             )}
@@ -1605,7 +1605,7 @@ function App({ user, signOut }: AppProps) {
                 <span className="panel-card-title">
                   🔍 Audit Checklist ({auditReport.overallStatus})
                 </span>
-                <span style={{ fontSize: "0.72rem", color: "#9ca3af" }}>
+                <span style={{ fontSize: "0.72rem", color: "#64748b" }}>
                   {auditReport.missingComponents.length} missing
                 </span>
               </div>
@@ -1620,9 +1620,9 @@ function App({ user, signOut }: AppProps) {
                         : "❌ "}
                       {item.component}
                     </div>
-                    <div style={{ color: "#d4d4d8" }}>{item.summary}</div>
+                    <div style={{ color: "#334155" }}>{item.summary}</div>
                     {item.recommendation && (
-                      <div style={{ color: "#9ca3af", marginTop: "2px" }}>
+                      <div style={{ color: "#64748b", marginTop: "2px" }}>
                         💡 {item.recommendation}
                       </div>
                     )}
