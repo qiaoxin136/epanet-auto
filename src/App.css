@@ -1205,7 +1205,7 @@
   text-align: center;
 }
 
-/* AWS Amplify Login Window (Authenticator) */
+/* AWS Amplify Login Window (Authenticator) — Coordinated Light App Theme */
 .amplify-auth-shell {
   min-height: 100vh;
   width: 100vw;
@@ -1213,20 +1213,127 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: radial-gradient(circle at top, #e0f2fe 0%, #f8fafc 60%, #f1f5f9 100%);
+  background: radial-gradient(circle at top, #e0f2fe 0%, #f0f9ff 45%, #f8fafc 100%);
+  --amplify-colors-background-primary: #ffffff;
+  --amplify-colors-background-secondary: #f8fafc;
+  --amplify-colors-font-primary: #0f172a;
+  --amplify-colors-font-secondary: #475569;
+  --amplify-colors-font-interactive: #0284c7;
+  --amplify-colors-brand-primary-10: #f0f9ff;
+  --amplify-colors-brand-primary-20: #e0f2fe;
+  --amplify-colors-brand-primary-40: #7dd3fc;
+  --amplify-colors-brand-primary-60: #38bdf8;
+  --amplify-colors-brand-primary-80: #0284c7;
+  --amplify-colors-brand-primary-90: #0369a1;
+  --amplify-colors-brand-primary-100: #075985;
+  --amplify-colors-border-primary: #cbd5e1;
+  --amplify-colors-border-secondary: #e2e8f0;
+  --amplify-colors-border-focus: #0284c7;
+  --amplify-components-authenticator-router-border-width: 1px;
+  --amplify-components-authenticator-router-border-color: #bae6fd;
+  --amplify-components-authenticator-router-background-color: #ffffff;
+  --amplify-components-authenticator-router-box-shadow: 0 14px 34px rgba(2, 132, 199, 0.1);
+}
+
+.amplify-auth-shell [data-amplify-authenticator] [data-amplify-router] {
+  border-radius: 16px;
+  border: 1px solid #bae6fd;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 14px 34px rgba(2, 132, 199, 0.1);
+  overflow: hidden;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-tabs__list {
+  background-color: #f0f9ff;
+  border-bottom: 1px solid #bae6fd;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-tabs__item {
+  color: #475569;
+  font-weight: 600;
+  background-color: transparent;
+  border-color: transparent;
+  padding: 14px 16px;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-tabs__item:hover {
+  color: #0284c7;
+  background-color: rgba(224, 242, 254, 0.5);
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-tabs__item--active {
+  color: #0284c7;
+  background-color: #ffffff;
+  border-top: 3px solid #0284c7;
+  border-bottom-color: transparent;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-label {
+  color: #334155;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-input,
+.amplify-auth-shell [data-amplify-authenticator] .amplify-field-group__outer-end .amplify-button {
+  background-color: #f8fafc;
+  border-color: #cbd5e1;
+  color: #0f172a;
+  border-radius: 10px;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-field-group--horizontal .amplify-input {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-field-group__outer-end .amplify-button {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-input:focus {
+  background-color: #ffffff;
+  border-color: #0284c7;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-button--primary {
+  background: linear-gradient(135deg, #0284c7 0%, #0d9488 100%);
+  border: none;
+  border-radius: 10px;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(2, 132, 199, 0.25);
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-button--primary:hover {
+  filter: brightness(1.06);
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-button--link {
+  color: #0284c7;
+  font-weight: 600;
+}
+
+.amplify-auth-shell [data-amplify-authenticator] .amplify-button--link:hover {
+  background-color: #f0f9ff;
+  color: #0369a1;
 }
 
 .amplify-auth-brand-header {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 14px;
-  padding: 18px 22px;
+  padding: 16px 22px;
   margin-bottom: 12px;
-  border-radius: 14px;
-  background: linear-gradient(145deg, #ffffff 0%, #f0f9ff 100%);
+  border-radius: 16px;
+  background: linear-gradient(145deg, #ffffff 0%, #f0f9ff 60%, #ecfdf5 100%);
   border: 1px solid #bae6fd;
   color: #0f172a;
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 10px 26px rgba(2, 132, 199, 0.09);
 }
 
 .amplify-auth-logo-wrap {
@@ -1257,10 +1364,13 @@
 }
 
 .amplify-auth-title {
-  font-size: 1.22rem;
+  font-size: 1.24rem;
   font-weight: 800;
   letter-spacing: 0.03em;
-  color: #0f172a;
+  background: linear-gradient(135deg, #0369a1 0%, #0d9488 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: #0369a1;
 }
 
 .amplify-auth-subtitle {

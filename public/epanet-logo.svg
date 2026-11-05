@@ -1,52 +1,52 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
   <defs>
     <linearGradient id="epanetLightBg" x1="10" y1="8" x2="110" y2="112" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stopColor="#ffffff" />
-      <stop offset="50%" stopColor="#f0f9ff" />
-      <stop offset="100%" stopColor="#ecfdf5" />
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="50%" stop-color="#e0f2fe" />
+      <stop offset="100%" stop-color="#d1fae5" />
     </linearGradient>
     <linearGradient id="epanetBorder" x1="8" y1="8" x2="112" y2="112" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stopColor="#38bdf8" />
-      <stop offset="35%" stopColor="#34d399" />
-      <stop offset="70%" stopColor="#fbbf24" />
-      <stop offset="100%" stopColor="#f472b6" />
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="35%" stop-color="#34d399" />
+      <stop offset="70%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#f472b6" />
     </linearGradient>
     <linearGradient id="epanetDropLight" x1="60" y1="16" x2="60" y2="100" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stopColor="#e0f2fe" />
-      <stop offset="55%" stopColor="#bae6fd" />
-      <stop offset="100%" stopColor="#7dd3fc" />
+      <stop offset="0%" stop-color="#f0f9ff" />
+      <stop offset="55%" stop-color="#bae6fd" />
+      <stop offset="100%" stop-color="#7dd3fc" />
     </linearGradient>
     <linearGradient id="epanetWaveLight" x1="30" y1="68" x2="90" y2="98" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stopColor="#6ee7b7" />
-      <stop offset="50%" stopColor="#5eead4" />
-      <stop offset="100%" stopColor="#38bdf8" />
+      <stop offset="0%" stop-color="#6ee7b7" />
+      <stop offset="50%" stop-color="#5eead4" />
+      <stop offset="100%" stop-color="#38bdf8" />
     </linearGradient>
   </defs>
 
   <!-- Light colorful rounded emblem shield -->
-  <rect x="6" y="6" width="108" height="108" rx="24" fill="url(#epanetLightBg)" stroke="url(#epanetBorder)" strokeWidth="3.5" />
+  <rect x="6" y="6" width="108" height="108" rx="24" fill="url(#epanetLightBg)" stroke="url(#epanetBorder)" stroke-width="3.5" />
 
   <!-- Soft colorful contour ring -->
-  <circle cx="60" cy="60" r="43" stroke="#7dd3fc" strokeOpacity="0.55" strokeWidth="1.6" strokeDasharray="4 4" />
+  <circle cx="60" cy="60" r="43" stroke="#38bdf8" stroke-opacity="0.55" stroke-width="1.6" stroke-dasharray="4 4" />
 
   <!-- Central Bright Water Droplet -->
   <path
     d="M60 16C60 16 30 51 30 72C30 88.5685 43.4315 102 60 102C76.5685 102 90 88.5685 90 72C90 51 60 16 60 16Z"
     fill="url(#epanetDropLight)"
-    stroke="#38bdf8"
-    strokeWidth="2.5"
+    stroke="#0ea5e9"
+    stroke-width="2.5"
   />
 
   <!-- Colorful aqua-emerald wave inside droplet -->
   <path
     d="M32 73C41 67 51 79 60 73C69 67 79 77 88 72C87.2 87.5 75 100 60 100C45 100 32.8 87.5 32 73Z"
     fill="url(#epanetWaveLight)"
-    opacity="0.92"
+    opacity="0.95"
   />
 
   <!-- EPANET Colorful Pressure-Contour Pipe Network Links -->
-  <g strokeWidth="3.4" strokeLinecap="round">
-    <line x1="60" y1="39" x2="43" y2="61" stroke="#0ea5e9" />
+  <g stroke-width="3.5" stroke-linecap="round">
+    <line x1="60" y1="39" x2="43" y2="61" stroke="#0284c7" />
     <line x1="60" y1="39" x2="77" y2="61" stroke="#10b981" />
     <line x1="43" y1="61" x2="77" y2="61" stroke="#f59e0b" />
     <line x1="43" y1="61" x2="50" y2="83" stroke="#ec4899" />
@@ -55,9 +55,9 @@
   </g>
 
   <!-- EPANET Colorful Tank, Pump & Junction Nodes -->
-  <circle cx="60" cy="39" r="6.2" fill="#38bdf8" stroke="#ffffff" strokeWidth="2.4" />
-  <circle cx="43" cy="61" r="5.6" fill="#fbbf24" stroke="#ffffff" strokeWidth="2.3" />
-  <circle cx="77" cy="61" r="5.6" fill="#34d399" stroke="#ffffff" strokeWidth="2.3" />
-  <circle cx="50" cy="83" r="5.4" fill="#fb7185" stroke="#ffffff" strokeWidth="2.3" />
-  <circle cx="70" cy="83" r="5.4" fill="#a78bfa" stroke="#ffffff" strokeWidth="2.3" />
+  <circle cx="60" cy="39" r="6.2" fill="#38bdf8" stroke="#ffffff" stroke-width="2.4" />
+  <circle cx="43" cy="61" r="5.6" fill="#fbbf24" stroke="#ffffff" stroke-width="2.3" />
+  <circle cx="77" cy="61" r="5.6" fill="#34d399" stroke="#ffffff" stroke-width="2.3" />
+  <circle cx="50" cy="83" r="5.4" fill="#fb7185" stroke="#ffffff" stroke-width="2.3" />
+  <circle cx="70" cy="83" r="5.4" fill="#a78bfa" stroke="#ffffff" stroke-width="2.3" />
 </svg>
