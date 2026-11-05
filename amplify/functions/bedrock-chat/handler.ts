@@ -5,9 +5,20 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 
 declare const process: { env: Record<string, string | undefined> };
 
+interface ChatImageAttachment {
+  id?: string;
+  name: string;
+  mimeType: string;
+  sizeBytes?: number;
+  dataUrl?: string;
+  width?: number;
+  height?: number;
+}
+
 interface ChatTurn {
   role: "user" | "assistant";
   content: string;
+  attachments?: ChatImageAttachment[];
 }
 
 interface AskGpt6SolEvent {
@@ -33,42 +44,102 @@ interface BedrockConverseResponse {
   };
 }
 
-function buildSimulatedReply(messages: ChatTurn[], systemPrompt?: string | null): string {
-  const lastUserMsg =
-    [...messages].reverse().find((m) => m.role === "user")?.content.trim() || "";
-  const lower = lastUserMsg.toLowerCase();
+type BedrockContentBlock =
+  | { text: string }
+  | {
+      image: {
+        format: "png" | "jpeg" | "gif" | "webp";
+        source: { bytes: string };
+      };
+    };
 
-  if (!lastUserMsg) {
-    return "Hello! I'm running on **openai.gpt-6-sol** via AWS Bedrock. How can I help you today?";
+function parseDataUrlImage(
+  att: ChatImageAttachment
+): { format: "png" | "jpeg" | "gif" | "webp"; bytes: string } | null {
+  if (!att.dataUrl) return null;
+  const match = att.dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,(.+)$/);
+  if (!match) return null;
+  const rawFormat = match[1].toLowerCase();
+  const base64Bytes = match[2];
+  let format: "png" | "jpeg" | "gif" | "webp" | null = null;
+  if (rawFormat === "png") format = "png";
+  else if (rawFormat === "jpeg" || rawFormat === "jpg") format = "jpeg";
+  else if (rawFormat === "gif") format = "gif";
+  else if (rawFormat === "webp") format = "webp";
+  if (!format) return null;
+  return { format, bytes: base64Bytes };
+}
+
+function normalizeMessagesForBedrock(
+  messages: ChatTurn[],
+  includeImageBytes: boolean
+): Array<{
+  role: "user" | "assistant";
+  content: BedrockContentBlock[];
+}> {
+  const cleaned: Array<{
+    role: "user" | "assistant";
+    content: BedrockContentBlock[];
+  }> = [];
+
+  for (const m of messages) {
+    const role: "user" | "assistant" =
+      m.role === "assistant" ? "assistant" : "user";
+    const blocks: BedrockContentBlock[] = [];
+
+    if (role === "user" && m.attachments && m.attachments.length > 0) {
+      for (const att of m.attachments) {
+        const parsedImg = includeImageBytes ? parseDataUrlImage(att) : null;
+        if (parsedImg) {
+          blocks.push({
+            image: {
+              format: parsedImg.format,
+              source: { bytes: parsedImg.bytes },
+            },
+          });
+        }
+      }
+    }
+
+    const attachmentNote =
+      m.attachments && m.attachments.length > 0
+        ? `\n[Attached image(s): ${m.attachments
+            .map((a) => `${a.name} (${a.mimeType})`)
+            .join(", ")}]`
+        : "";
+    const text = `${(m.content || "").trim()}${
+      includeImageBytes ? "" : attachmentNote
+    }`.trim();
+
+    if (text && text !== "...") {
+      blocks.push({ text });
+    } else if (blocks.length > 0) {
+      blocks.push({ text: "Please analyze the attached image(s)." });
+    }
+
+    if (blocks.length === 0) continue;
+
+    // Bedrock Converse requires the conversation to begin with a "user" message
+    if (cleaned.length === 0 && role !== "user") {
+      continue;
+    }
+
+    const prev = cleaned[cleaned.length - 1];
+    if (prev && prev.role === role) {
+      prev.content.push(...blocks);
+    } else {
+      cleaned.push({ role, content: blocks });
+    }
   }
 
-  if (lower.includes("hello") || lower.includes("hi ") || lower === "hi") {
-    return "Hello! I'm **GPT-6 Sol** (`openai.gpt-6-sol`) hosted on AWS Bedrock. Ask me anything—from coding and architecture to data analysis or hydraulic modeling.";
+  if (cleaned.length === 0) {
+    cleaned.push({
+      role: "user",
+      content: [{ text: "Hello!" }],
+    });
   }
 
-  if (lower.includes("model") || lower.includes("who are you") || lower.includes("engine")) {
-    return [
-      "I am **OpenAI GPT-6 Sol** (`openai.gpt-6-sol`), invoked via AWS Bedrock (`us.openai.gpt-6-sol`).",
-      "",
-      "- **Provider:** OpenAI on Amazon Bedrock",
-      "- **Model ID:** `openai.gpt-6-sol`",
-      "- **Inference Profile:** `us.openai.gpt-6-sol`",
-      "- **Streaming & Converse API:** Supported",
-    ].join("\n");
-  }
-
-  return [
-    `Here is a synthesized response from **openai.gpt-6-sol** for your query:`,
-    "",
-    `> "${lastUserMsg}"`,
-    "",
-    "### Key Takeaways",
-    "1. **Direct Answer:** Your request has been processed through the conversational pipeline.",
-    "2. **Engine Context:** Configured with AWS Bedrock `openai.gpt-6-sol` (`us.openai.gpt-6-sol`).",
-    systemPrompt
-      ? `3. **Active System Instruction:** _${systemPrompt}_`
-      : "3. **Next Steps:** Feel free to ask follow-up questions, paste code snippets, or refine the constraints.",
-  ].join("\n");
+  return cleaned;
 }
 
 async function invokeBedrockConverse(
@@ -76,16 +147,19 @@ async function invokeBedrockConverse(
   modelOrProfileId: string,
   messages: ChatTurn[],
   systemPrompt?: string | null,
-  temperature?: number | null
+  temperature?: number | null,
+  includeImageBytes: boolean = true
 ): Promise<BedrockConverseResponse> {
   const hostname = `bedrock-runtime.${region}.amazonaws.com`;
   const path = `/model/${encodeURIComponent(modelOrProfileId)}/converse`;
 
+  const normalizedMessages = normalizeMessagesForBedrock(
+    messages,
+    includeImageBytes
+  );
+
   const bodyObj: Record<string, unknown> = {
-    messages: messages.map((m) => ({
-      role: m.role === "assistant" ? "assistant" : "user",
-      content: [{ text: m.content }],
-    })),
+    messages: normalizedMessages,
     inferenceConfig: {
       temperature: typeof temperature === "number" ? temperature : 0.7,
       maxTokens: 2048,
@@ -136,26 +210,51 @@ async function invokeBedrockConverse(
 export const handler = async (event: AskGpt6SolEvent) => {
   const startedAt = Date.now();
   const engineId = process.env.BEDROCK_ENGINE_ID || "openai.gpt-6-sol";
-  const profileId = process.env.BEDROCK_INFERENCE_PROFILE_ID || "us.openai.gpt-6-sol";
-  const region = process.env.BEDROCK_REGION || process.env.AWS_REGION || "us-east-2";
+  const profileId =
+    process.env.BEDROCK_INFERENCE_PROFILE_ID || "us.openai.gpt-6-sol";
+  const region =
+    process.env.BEDROCK_REGION || process.env.AWS_REGION || "us-east-2";
 
   let messages: ChatTurn[] = [];
   try {
     messages = JSON.parse(event.arguments.messagesJson || "[]");
   } catch {
-    messages = [{ role: "user", content: String(event.arguments.messagesJson || "") }];
+    messages = [
+      { role: "user", content: String(event.arguments.messagesJson || "") },
+    ];
   }
 
-  const mode = event.arguments.mode || "auto";
+  const hasImages = messages.some(
+    (m) => m.attachments && m.attachments.length > 0
+  );
 
-  if (mode !== "simulated") {
+  // Live AWS Bedrock Only: try primary profile first, then live Bedrock fallback models if needed
+  const candidateAttempts: Array<{ model: string; withImages: boolean }> = [
+    { model: profileId, withImages: hasImages },
+    { model: "global.openai.gpt-6-sol", withImages: hasImages },
+    ...(hasImages
+      ? [
+          { model: "us.amazon.nova-pro-v1:0", withImages: true },
+          { model: "us.amazon.nova-lite-v1:0", withImages: true },
+        ]
+      : []),
+    { model: "openai.gpt-oss-120b-1:0", withImages: false },
+    { model: "us.amazon.nova-pro-v1:0", withImages: false },
+    { model: "us.amazon.nova-lite-v1:0", withImages: false },
+  ];
+
+  let primaryError = "";
+  let lastError = "";
+
+  for (const attempt of candidateAttempts) {
     try {
       const result = await invokeBedrockConverse(
         region,
-        profileId,
+        attempt.model,
         messages,
         event.arguments.systemPrompt,
-        event.arguments.temperature
+        event.arguments.temperature,
+        attempt.withImages
       );
 
       const text =
@@ -167,7 +266,7 @@ export const handler = async (event: AskGpt6SolEvent) => {
       return {
         reply: text,
         modelId: engineId,
-        inferenceProfileId: profileId,
+        inferenceProfileId: attempt.model,
         source: "aws-bedrock",
         latencyMs: Date.now() - startedAt,
         promptTokens: result.usage?.inputTokens ?? 0,
@@ -175,42 +274,22 @@ export const handler = async (event: AskGpt6SolEvent) => {
         errorDetail: null,
       };
     } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      if (mode === "bedrock") {
-        return {
-          reply: `AWS Bedrock invocation error for \`${engineId}\`: ${errMessage}`,
-          modelId: engineId,
-          inferenceProfileId: profileId,
-          source: "bedrock-error",
-          latencyMs: Date.now() - startedAt,
-          promptTokens: 0,
-          completionTokens: 0,
-          errorDetail: errMessage,
-        };
-      }
-      const fallbackReply = buildSimulatedReply(messages, event.arguments.systemPrompt);
-      return {
-        reply: fallbackReply,
-        modelId: engineId,
-        inferenceProfileId: profileId,
-        source: "simulated-fallback",
-        latencyMs: Date.now() - startedAt,
-        promptTokens: Math.ceil(JSON.stringify(messages).length / 4),
-        completionTokens: Math.ceil(fallbackReply.length / 4),
-        errorDetail: errMessage,
-      };
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!primaryError) primaryError = msg;
+      lastError = msg;
     }
   }
 
-  const simulatedReply = buildSimulatedReply(messages, event.arguments.systemPrompt);
+  const errDetail = primaryError || lastError || "Unknown AWS Bedrock error";
   return {
-    reply: simulatedReply,
+    reply: `AWS Bedrock invocation error for \`${engineId}\` (\`${profileId}\`): ${errDetail}`,
     modelId: engineId,
     inferenceProfileId: profileId,
-    source: "simulated",
+    source: "bedrock-error",
     latencyMs: Date.now() - startedAt,
-    promptTokens: Math.ceil(JSON.stringify(messages).length / 4),
-    completionTokens: Math.ceil(simulatedReply.length / 4),
-    errorDetail: null,
+    promptTokens: 0,
+    completionTokens: 0,
+    errorDetail: errDetail,
   };
 };
+

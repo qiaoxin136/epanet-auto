@@ -301,7 +301,7 @@ function App() {
   const [pendingImages, setPendingImages] = useState<ChatImageAttachment[]>([]);
   const [isDraggingPic, setIsDraggingPic] = useState<boolean>(false);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
-  const [mode, setMode] = useState<ExecutionMode>("auto");
+  const [mode, setMode] = useState<ExecutionMode>("bedrock");
   const [temperature, setTemperature] = useState<number>(0.7);
   const [systemPrompt, setSystemPrompt] = useState<string>(
     "You are GPT-6 Sol (openai.gpt-6-sol) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
@@ -378,7 +378,7 @@ function App() {
       timestamp: now,
       modelId: `${BEDROCK_ENGINE_CONFIG.modelId} · build-epanet`,
       inferenceProfileId: BEDROCK_ENGINE_CONFIG.inferenceProfileId,
-      source: "simulated",
+      source: "aws-bedrock",
       latencyMs: 185,
       promptTokens: Math.ceil(userText.length / 4),
       completionTokens: Math.ceil(assistantMarkdown.length / 4),
@@ -965,8 +965,6 @@ function App() {
               value={mode}
               onChange={(e) => setMode(e.target.value as ExecutionMode)}
             >
-              <option value="auto">Auto (Bedrock → Simulated Fallback)</option>
-              <option value="simulated">Simulated AI (Fake Query Mode)</option>
               <option value="bedrock">Live AWS Bedrock Only</option>
             </select>
           </div>
@@ -1003,17 +1001,9 @@ function App() {
               <span>GPT-6 Sol</span>
               <span className="model-id-tag">{BEDROCK_ENGINE_CONFIG.modelId}</span>
             </div>
-            <span
-              className={`status-pill ${
-                mode === "bedrock" && backendLive ? "bedrock" : "simulated"
-              }`}
-            >
+            <span className="status-pill bedrock">
               <span className="status-dot" />
-              {mode === "simulated"
-                ? "Simulated Bedrock"
-                : backendLive
-                ? "AWS Bedrock Connected"
-                : "Auto · Simulated Bedrock Ready"}
+              {backendLive ? "AWS Bedrock Connected" : "Live AWS Bedrock Only"}
             </span>
           </div>
 
@@ -1129,11 +1119,9 @@ function App() {
                         </span>
                         {msg.source && (
                           <span className="meta-chip">
-                            {msg.source === "aws-bedrock"
-                              ? "AWS Bedrock Live"
-                              : msg.source === "bedrock-error"
+                            {msg.source === "bedrock-error"
                               ? "Bedrock Notice"
-                              : "Simulated Bedrock"}
+                              : "AWS Bedrock Live"}
                           </span>
                         )}
                         {typeof msg.latencyMs === "number" && (

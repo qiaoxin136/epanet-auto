@@ -30,6 +30,48 @@ function localDriveFolderPlugin(): Plugin {
     name: "local-drive-folder-scanner",
     configureServer(server) {
       server.middlewares.use((req: IncomingReq, res: ServerRes, next: () => void) => {
+        if (req.url?.startsWith("/api/bedrock-chat") && req.method === "POST") {
+          let rawBody = "";
+          req.on("data", (chunk: unknown) => {
+            rawBody += String(chunk ?? "");
+          });
+          req.on("end", () => {
+            void (async () => {
+              try {
+                const payload = JSON.parse(rawBody || "{}") as {
+                  messagesJson?: string;
+                  systemPrompt?: string | null;
+                  temperature?: number | null;
+                  mode?: string | null;
+                };
+                const mod = await server.ssrLoadModule(
+                  "/amplify/functions/bedrock-chat/handler.ts"
+                );
+                const result = await mod.handler({
+                  arguments: {
+                    messagesJson: payload.messagesJson || "[]",
+                    systemPrompt: payload.systemPrompt,
+                    temperature: payload.temperature,
+                    mode: "bedrock",
+                  },
+                });
+                res.statusCode = 200;
+                res.setHeader("Content-Type", "application/json");
+                res.end(JSON.stringify(result));
+              } catch (err) {
+                res.statusCode = 500;
+                res.setHeader("Content-Type", "application/json");
+                res.end(
+                  JSON.stringify({
+                    error: err instanceof Error ? err.message : String(err),
+                  })
+                );
+              }
+            })();
+          });
+          return;
+        }
+
         if (!req.url?.startsWith("/api/local-folder") || req.method !== "POST") {
           next();
           return;
