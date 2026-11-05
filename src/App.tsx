@@ -6,7 +6,6 @@ import {
   ChatMessage,
   ConversationThread,
   ExecutionMode,
-  isAmplifyBackendConfigured,
   queryBedrockGpt6Sol,
 } from "./bedrockEngine";
 import {
@@ -22,32 +21,6 @@ import {
 } from "./epanetBuilder";
 
 const STORAGE_KEY = "epanet_auto_gpt6_sol_threads_v1";
-
-const STARTER_PROMPTS = [
-  {
-    title: "Audit Water System Layers",
-    desc: "Check missing GIS layers, FacilityIDs, and DEM folder readiness",
-    prompt:
-      "Please audit my water system JSON layers (pipe, tank, pump, water-demand, pressure-zone) and DEM folder for build-epanet.",
-  },
-  {
-    title: "Build EPANET .inp Model",
-    desc: "Run build-epanet agent pipeline with EPSG:2264 & tank/pump auto-connect",
-    prompt:
-      "Build the EPANET .inp model from the loaded water system layers using the build-epanet agent rules.",
-  },
-  {
-    title: "AWS Bedrock + Amplify Code",
-    desc: "Show a TypeScript snippet to query openai.gpt-6-sol via AWS Amplify Gen 2",
-    prompt:
-      "Write a TypeScript example showing how to invoke openai.gpt-6-sol on AWS Bedrock using Amplify Gen 2.",
-  },
-  {
-    title: "Inspect Engine Metadata",
-    desc: "Verify the active Bedrock model ID, inference profile, and region",
-    prompt: "What Bedrock engine and inference profile are you running on?",
-  },
-];
 
 function createInitialThread(): ConversationThread {
   const now = new Date().toISOString();
@@ -314,7 +287,7 @@ function App({ user, signOut }: AppProps) {
   const [pendingImages, setPendingImages] = useState<ChatImageAttachment[]>([]);
   const [isDraggingPic, setIsDraggingPic] = useState<boolean>(false);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
-  const [mode, setMode] = useState<ExecutionMode>("bedrock");
+  const mode: ExecutionMode = "bedrock";
   const [temperature, setTemperature] = useState<number>(0.7);
   const [systemPrompt, setSystemPrompt] = useState<string>(
     "You are GPT-6 Sol (openai.gpt-6-sol) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
@@ -909,7 +882,6 @@ function App({ user, signOut }: AppProps) {
     }
   }
 
-  const backendLive = isAmplifyBackendConfigured();
   const loadedLayersCount = Object.keys(waterLayers).length;
 
   return (
@@ -958,30 +930,6 @@ function App({ user, signOut }: AppProps) {
             </div>
           ))}
         </div>
-
-        <div className="sidebar-footer">
-          <div className="engine-card">
-            <div className="engine-card-row">
-              <span className="engine-title">{BEDROCK_ENGINE_CONFIG.modelName}</span>
-              <span className="engine-code">{BEDROCK_ENGINE_CONFIG.modelId}</span>
-            </div>
-            <div className="engine-card-row" style={{ color: "#64748b" }}>
-              <span>Inference Profile</span>
-              <code>{BEDROCK_ENGINE_CONFIG.inferenceProfileId}</code>
-            </div>
-            <label className="settings-label" htmlFor="mode-select">
-              Execution Mode
-            </label>
-            <select
-              id="mode-select"
-              className="mode-select"
-              value={mode}
-              onChange={(e) => setMode(e.target.value as ExecutionMode)}
-            >
-              <option value="bedrock">Live AWS Bedrock Only</option>
-            </select>
-          </div>
-        </div>
       </aside>
 
       {/* Center Conversational Area (Always Open + Picture Drop Support) */}
@@ -1010,14 +958,6 @@ function App({ user, signOut }: AppProps) {
             >
               ☰
             </button>
-            <div className="model-selector-pill">
-              <span>GPT-6 Sol</span>
-              <span className="model-id-tag">{BEDROCK_ENGINE_CONFIG.modelId}</span>
-            </div>
-            <span className="status-pill bedrock">
-              <span className="status-dot" />
-              {backendLive ? "AWS Bedrock Connected" : "Live AWS Bedrock Only"}
-            </span>
           </div>
 
           <div className="topbar-right">
@@ -1094,20 +1034,6 @@ function App({ user, signOut }: AppProps) {
                 Drop any picture file here or configure your water system JSON layers
                 on the right panel.
               </p>
-
-              <div className="starter-grid">
-                {STARTER_PROMPTS.map((item) => (
-                  <button
-                    key={item.title}
-                    type="button"
-                    className="starter-card"
-                    onClick={() => sendPrompt(item.prompt)}
-                  >
-                    <span className="starter-card-title">{item.title}</span>
-                    <span className="starter-card-desc">{item.desc}</span>
-                  </button>
-                ))}
-              </div>
             </div>
           ) : (
             <div className="chat-column">
