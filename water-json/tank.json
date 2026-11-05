@@ -1,0 +1,10 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "Name": "Central Elevated Tank", "Overflow": 515, "Depth": 35, "Diameter": 65, "ELEV_FT": 480 },
+      "geometry": { "type": "Point", "coordinates": [2014985, 745010] }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "Name": "High Service Booster Pump 1", "Capacity_M": 1.8, "HeadFt": 120 },
+      "geometry": { "type": "Point", "coordinates": [2016000, 745300] }
+    }
+  ]
+}

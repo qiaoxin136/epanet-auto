@@ -1,0 +1,25 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "Diameter": 12, "Material": "DIP", "Roughness": 130 },
+      "geometry": { "type": "LineString", "coordinates": [[2015000, 745000], [2015650, 745200]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "Diameter": 10, "Material": "PVC", "Roughness": 130 },
+      "geometry": { "type": "LineString", "coordinates": [[2015650, 745200], [2016320, 745390]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "Diameter": 8, "Material": "DIP", "Roughness": 110 },
+      "geometry": { "type": "LineString", "coordinates": [[2016320, 745390], [2017210, 745610]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "Diameter": 8, "Material": "PVC", "Roughness": 120 },
+      "geometry": { "type": "LineString", "coordinates": [[2015650, 745200], [2015800, 745800]] }
+    }
+  ]
+}

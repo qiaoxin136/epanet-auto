@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "HydrantNo": "HYD-101" },
+      "geometry": { "type": "Point", "coordinates": [2015640, 745195] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "HydrantNo": "HYD-102" },
+      "geometry": { "type": "Point", "coordinates": [2016315, 745392] }
+    }
+  ]
+}
