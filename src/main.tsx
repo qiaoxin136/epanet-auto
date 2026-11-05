@@ -20,7 +20,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
               <div className="amplify-auth-brand-header">
                 <div className="amplify-auth-logo-wrap">
                   <img
-                    src="/epanet-logo.svg"
+                    src="/epanet-logo.svg?v=2"
                     alt="EPANET Logo"
                     className="amplify-auth-epanet-logo"
                   />
