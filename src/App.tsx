@@ -275,7 +275,20 @@ function readImageFile(file: File): Promise<ChatImageAttachment> {
   });
 }
 
-function App() {
+interface AppProps {
+  user?: {
+    username?: string;
+    userId?: string;
+    signInDetails?: {
+      loginId?: string;
+    };
+  };
+  signOut?: () => void;
+}
+
+function App({ user, signOut }: AppProps) {
+  const userLabel =
+    user?.signInDetails?.loginId || user?.username || "Authenticated User";
   const [threads, setThreads] = useState<ConversationThread[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -1008,6 +1021,19 @@ function App() {
           </div>
 
           <div className="topbar-right">
+            <span className="user-auth-pill" title={`Signed in as ${userLabel}`}>
+              👤 {userLabel}
+            </span>
+            {signOut && (
+              <button
+                type="button"
+                className="icon-btn signout-btn"
+                onClick={() => signOut()}
+                title="Sign out of AWS Amplify"
+              >
+                ⎋ Sign Out
+              </button>
+            )}
             <button
               type="button"
               className="icon-btn"
