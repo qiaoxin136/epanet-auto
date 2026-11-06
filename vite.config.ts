@@ -6,6 +6,8 @@ interface NodeFs {
   statSync(p: string): { isDirectory(): boolean; isFile(): boolean };
   readdirSync(p: string): string[];
   readFileSync(p: string, encoding: string): string;
+  mkdirSync(p: string, options?: { recursive?: boolean }): void;
+  writeFileSync(p: string, data: unknown, encoding?: string): void;
 }
 
 interface NodePath {
@@ -63,6 +65,91 @@ function localDriveFolderPlugin(): Plugin {
                 res.setHeader("Content-Type", "application/json");
                 res.end(
                   JSON.stringify({
+                    error: err instanceof Error ? err.message : String(err),
+                  })
+                );
+              }
+            })();
+          });
+          return;
+        }
+
+        if (req.url?.startsWith("/api/save-dem") && req.method === "POST") {
+          let rawSaveBody = "";
+          req.on("data", (chunk: unknown) => {
+            rawSaveBody += String(chunk ?? "");
+          });
+          req.on("end", () => {
+            void (async () => {
+              try {
+                const fsSpecifier = "node:" + "fs";
+                const pathSpecifier = "node:" + "path";
+                const bufferSpecifier = "node:" + "buffer";
+                const fs = (await import(/* @vite-ignore */ fsSpecifier)) as unknown as NodeFs;
+                const path = (await import(/* @vite-ignore */ pathSpecifier)) as unknown as NodePath;
+                const bufferMod = (await import(/* @vite-ignore */ bufferSpecifier)) as {
+                  Buffer: { from(str: string, enc: string): unknown };
+                };
+
+                const payload = JSON.parse(rawSaveBody || "{}") as {
+                  folderPath?: string;
+                  fileName?: string;
+                  base64Data?: string;
+                  geojsonContent?: string;
+                };
+                const targetFolder = (payload.folderPath || "").trim();
+                const fileName = (payload.fileName || "USGS_NOAA_DEM.tif").replace(
+                  /[^a-zA-Z0-9._-]/g,
+                  "_"
+                );
+
+                if (!targetFolder || !payload.base64Data) {
+                  res.statusCode = 400;
+                  res.setHeader("Content-Type", "application/json");
+                  res.end(
+                    JSON.stringify({
+                      saved: false,
+                      error: "Missing folderPath or base64Data.",
+                    })
+                  );
+                  return;
+                }
+
+                const resolvedFolder = path.resolve(targetFolder);
+                if (!fs.existsSync(resolvedFolder)) {
+                  fs.mkdirSync(resolvedFolder, { recursive: true });
+                }
+
+                const fullFilePath = path.join(resolvedFolder, fileName);
+                const fileBuffer = bufferMod.Buffer.from(payload.base64Data, "base64");
+                fs.writeFileSync(fullFilePath, fileBuffer);
+
+                if (payload.geojsonContent) {
+                  const aoiPath = path.join(resolvedFolder, "aoi_noaa_compatible.geojson");
+                  fs.writeFileSync(aoiPath, payload.geojsonContent, "utf-8");
+                }
+
+                const entries = fs.readdirSync(resolvedFolder);
+                const tifFiles = entries.filter((name) =>
+                  /\.(tif|tiff)$/i.test(name)
+                );
+
+                res.statusCode = 200;
+                res.setHeader("Content-Type", "application/json");
+                res.end(
+                  JSON.stringify({
+                    saved: true,
+                    folderPath: resolvedFolder,
+                    savedPath: fullFilePath,
+                    tifFiles,
+                  })
+                );
+              } catch (err) {
+                res.statusCode = 500;
+                res.setHeader("Content-Type", "application/json");
+                res.end(
+                  JSON.stringify({
+                    saved: false,
                     error: err instanceof Error ? err.message : String(err),
                   })
                 );

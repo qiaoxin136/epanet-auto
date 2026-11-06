@@ -12,11 +12,13 @@ import {
   AuditReport,
   BuildEpanetResult,
   DEM_DOWNLOAD_URL,
+  DemDownloadProgress,
   UploadedLayerInfo,
   WaterLayerKey,
   auditWaterSystem,
   buildEpanetModel,
   createSampleWaterSystemLayers,
+  downloadDemForWaterSystem,
   parseWaterJsonFile,
 } from "./epanetBuilder";
 
@@ -300,6 +302,10 @@ function App({ user, signOut }: AppProps) {
   const [targetCrs, setTargetCrs] = useState<string>("EPSG:2264");
   const [demFolder, setDemFolder] = useState<string>("D:\\AI\\agent\\epanet-auto\\DEM");
   const [demTileNames, setDemTileNames] = useState<string[]>([]);
+  const [isDownloadingDem, setIsDownloadingDem] = useState<boolean>(false);
+  const [demDownloadProgress, setDemDownloadProgress] =
+    useState<DemDownloadProgress | null>(null);
+  const [demDownloadError, setDemDownloadError] = useState<string | null>(null);
   const [waterJsonFolder, setWaterJsonFolder] = useState<string>(
     "D:\\AI\\agent\\epanet-auto\\water-json"
   );
@@ -606,40 +612,62 @@ function App({ user, signOut }: AppProps) {
     setAuditReport(report);
   }
 
-  function handleDemDownloadClick() {
+  async function handleDemDownloadClick() {
+    if (isDownloadingDem) return;
+
     let targetDemDir = demFolder.trim();
     if (!targetDemDir) {
-      const prompted = window.prompt(
-        "Please set up the destination folder path for DEM GeoTIFF data before downloading:",
-        "D:\\AI\\agent\\epanet-auto\\DEM"
-      );
-      if (prompted && prompted.trim()) {
-        targetDemDir = prompted.trim();
-        setDemFolder(targetDemDir);
-      }
+      targetDemDir = "D:\\AI\\agent\\epanet-auto\\DEM";
+      setDemFolder(targetDemDir);
     }
 
-    window.open(DEM_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
+    setIsDownloadingDem(true);
+    setDemDownloadError(null);
+    setDemDownloadProgress({
+      percent: 5,
+      stage: "Initializing DEM Download",
+      detail: `Preparing DEM download for ${targetDemDir}...`,
+    });
 
-    appendAgentConversationPair(
-      `Open DEM Downloader (${DEM_DOWNLOAD_URL}) for folder: ${
-        targetDemDir || "Not set"
-      }`,
-      [
-        `### 🗺️ DEM Elevation Downloader Opened`,
-        `- **Download Portal:** [${DEM_DOWNLOAD_URL}](${DEM_DOWNLOAD_URL})`,
-        `- **Configured DEM Data Folder:** \`${
-          targetDemDir || "Please enter a DEM folder path in the right panel"
-        }\``,
-        "",
-        "#### Instructions",
-        "1. In the opened DEM Download window, select your water system's area of interest (or upload your boundary GeoJSON).",
-        `2. Save the downloaded \`.tif\` DEM tiles into **\`${
-          targetDemDir || "D:\\AI\\agent\\epanet-auto\\DEM"
-        }\`**.`,
-        "3. Click **🔍 Audit** on the right panel to verify DEM coverage and component readiness, then click **⚡ Build** to generate the EPANET `.inp` file.",
-      ].join("\n")
-    );
+    try {
+      let activeLayers = waterLayers;
+      if (Object.keys(activeLayers).length === 0 && waterJsonFolder.trim()) {
+        setDemDownloadProgress({
+          percent: 8,
+          stage: "Scanning Water System JSONs",
+          detail: `Reading water system AOI from ${waterJsonFolder.trim()}...`,
+        });
+        const scanned = await scanLocalWaterJsonFolder(waterJsonFolder);
+        if (Object.keys(scanned).length > 0) {
+          activeLayers = { ...activeLayers, ...scanned };
+        }
+      }
+
+      const result = await downloadDemForWaterSystem({
+        layers: activeLayers,
+        demFolder: targetDemDir,
+        targetCrs,
+        onProgress: (prog) => {
+          setDemDownloadProgress(prog);
+        },
+      });
+
+      setDemTileNames((prev) =>
+        Array.from(new Set([...prev, ...result.tifFiles]))
+      );
+
+      appendAgentConversationPair(
+        `Download DEM GeoTIFF tiles from ${DEM_DOWNLOAD_URL} into ${targetDemDir}`,
+        result.markdownSummary
+      );
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Failed to download DEM tile.";
+      setDemDownloadError(msg);
+      setDemDownloadProgress(null);
+    } finally {
+      setIsDownloadingDem(false);
+    }
   }
 
   async function handleRunAudit() {
@@ -1222,9 +1250,12 @@ function App({ user, signOut }: AppProps) {
               type="button"
               className="epanet-btn dem-btn"
               onClick={handleDemDownloadClick}
+              disabled={isDownloadingDem}
               title={`Download DEM tiles from ${DEM_DOWNLOAD_URL}`}
             >
-              ⬇ DEM Download
+              {isDownloadingDem
+                ? `⏳ ${demDownloadProgress?.percent ?? 0}%`
+                : "⬇ DEM Download"}
             </button>
             <button
               type="button"
@@ -1492,10 +1523,58 @@ function App({ user, signOut }: AppProps) {
                 type="button"
                 className="layer-upload-btn"
                 onClick={handleDemDownloadClick}
+                disabled={isDownloadingDem}
               >
-                Download DEM ↗
+                {isDownloadingDem
+                  ? `⏳ Downloading (${demDownloadProgress?.percent ?? 0}%)...`
+                  : "⬇ Download DEM"}
               </button>
             </div>
+
+            {demDownloadProgress && (
+              <div
+                className={`dem-progress-container ${
+                  demDownloadProgress.percent >= 100 ? "completed" : "active"
+                }`}
+              >
+                <div className="dem-progress-header">
+                  <span className="dem-progress-stage">
+                    {demDownloadProgress.percent >= 100 ? "✅ " : "⏳ "}
+                    {demDownloadProgress.stage}
+                  </span>
+                  <span className="dem-progress-pct">
+                    {demDownloadProgress.percent}%
+                  </span>
+                </div>
+                <div className="dem-progress-track">
+                  <div
+                    className={`dem-progress-fill ${
+                      demDownloadProgress.percent >= 100 ? "completed" : "active"
+                    }`}
+                    style={{ width: `${demDownloadProgress.percent}%` }}
+                  />
+                </div>
+                <div className="dem-progress-detail">
+                  {demDownloadProgress.detail}
+                </div>
+              </div>
+            )}
+
+            {demDownloadError && (
+              <div style={{ fontSize: "0.73rem", color: "#dc2626" }}>
+                ⚠ DEM Download Error: {demDownloadError}
+              </div>
+            )}
+
+            {demTileNames.length > 0 && (
+              <div className="dem-files-badges">
+                {demTileNames.map((name) => (
+                  <span key={name} className="dem-file-chip">
+                    🗺️ {name}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Step 3: Model CRS & Name Config */}
