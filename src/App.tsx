@@ -21,6 +21,7 @@ import {
   downloadDemForWaterSystem,
   parseWaterJsonFile,
 } from "./epanetBuilder";
+import { extractPdfContent } from "./pdfExtractor";
 
 const STORAGE_KEY = "epanet_auto_gpt6_sol_threads_v1";
 
@@ -289,66 +290,38 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-function extractPdfInfoFromBuffer(buffer: ArrayBuffer): {
-  pageCount: number;
-  extractedText: string;
-} {
-  try {
-    const decoder = new TextDecoder("latin1");
-    const raw = decoder.decode(buffer);
-    const pageMatches = raw.match(/\/Type\s*\/Page\b/g);
-    const pageCount = Math.max(1, pageMatches ? pageMatches.length : 1);
-
-    // Extract readable text strings enclosed in PDF text objects (...)
-    const textChunks: string[] = [];
-    const regex = /\(([^()\\]{3,200})\)/g;
-    let match: RegExpExecArray | null = null;
-    while ((match = regex.exec(raw)) !== null && textChunks.length < 160) {
-      const candidate = match[1].replace(/\s+/g, " ").trim();
-      if (/^[a-zA-Z0-9.,;:'"?!\-+/$%&()[\]\s]{4,}$/.test(candidate)) {
-        textChunks.push(candidate);
-      }
-    }
-    const extractedText = textChunks.join(" ").slice(0, 3500);
-    return { pageCount, extractedText };
-  } catch {
-    return { pageCount: 1, extractedText: "" };
-  }
-}
-
-function readImageFile(file: File): Promise<ChatImageAttachment> {
+async function readImageFile(file: File): Promise<ChatImageAttachment> {
   const isPdf =
     file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
 
   if (isPdf) {
-    return new Promise((resolve, reject) => {
-      const dataUrlReader = new FileReader();
-      dataUrlReader.onerror = () =>
-        reject(new Error(`Failed to read ${file.name}`));
-      dataUrlReader.onload = async () => {
-        const dataUrl = String(dataUrlReader.result || "");
-        let pageCount = 1;
-        let extractedText = "";
-        try {
-          const buf = await file.arrayBuffer();
-          const info = extractPdfInfoFromBuffer(buf);
-          pageCount = info.pageCount;
-          extractedText = info.extractedText;
-        } catch {
-          // Ignore binary parse errors
-        }
-        resolve({
-          id: `pdf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          name: file.name,
-          mimeType: "application/pdf",
-          sizeBytes: file.size,
-          dataUrl,
-          pageCount,
-          extractedText,
-        });
-      };
-      dataUrlReader.readAsDataURL(file);
+    const buf = await file.arrayBuffer();
+    const parsed = await extractPdfContent(buf);
+
+    // Keep base64 dataUrl for smaller PDFs (< 2 MB) or use object URL so localStorage never overflows
+    const dataUrl = await new Promise<string>((resolve) => {
+      if (file.size > 2 * 1024 * 1024) {
+        resolve(URL.createObjectURL(file));
+        return;
+      }
+      const reader = new FileReader();
+      reader.onerror = () => resolve(URL.createObjectURL(file));
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.readAsDataURL(file);
     });
+
+    return {
+      id: `pdf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name: file.name,
+      mimeType: "application/pdf",
+      sizeBytes: file.size,
+      dataUrl,
+      pageCount: parsed.pageCount,
+      wordCount: parsed.wordCount,
+      extractedText: parsed.extractedText,
+      renderedPageImages: parsed.renderedPageImages,
+      pdfJsExtracted: true,
+    };
   }
 
   return new Promise((resolve, reject) => {
@@ -1046,16 +1019,25 @@ function App({ user, signOut }: AppProps) {
     URL.revokeObjectURL(url);
   }
 
-  async function sendPrompt(promptText: string, existingHistory?: ChatMessage[]) {
+  async function sendPrompt(
+    promptText: string,
+    existingHistory?: ChatMessage[],
+    explicitAttachments?: ChatImageAttachment[]
+  ) {
     const trimmed = promptText.trim();
-    if ((!trimmed && pendingImages.length === 0) || isStreaming || !activeThread) {
+    const activeAttachments = explicitAttachments ?? pendingImages;
+    if (
+      (!trimmed && activeAttachments.length === 0) ||
+      isStreaming ||
+      !activeThread
+    ) {
       return;
     }
 
     // Intercept explicit audit / build chat requests so chat + right panel stay in sync
     const lowerPrompt = trimmed.toLowerCase();
     if (
-      pendingImages.length === 0 &&
+      activeAttachments.length === 0 &&
       lowerPrompt.includes("audit") &&
       (lowerPrompt.includes("water") ||
         lowerPrompt.includes("epanet") ||
@@ -1066,7 +1048,7 @@ function App({ user, signOut }: AppProps) {
       return;
     }
     if (
-      pendingImages.length === 0 &&
+      activeAttachments.length === 0 &&
       lowerPrompt.includes("build") &&
       lowerPrompt.includes(".inp")
     ) {
@@ -1075,7 +1057,7 @@ function App({ user, signOut }: AppProps) {
       return;
     }
 
-    const attachedImages = [...pendingImages];
+    const attachedImages = [...activeAttachments];
     const baseMessages = existingHistory ?? activeThread.messages;
     const displayPrompt =
       trimmed ||
@@ -1205,7 +1187,7 @@ function App({ user, signOut }: AppProps) {
       0,
       priorMessages.lastIndexOf(lastUser)
     );
-    sendPrompt(lastUser.content, historyBeforeLastUser);
+    sendPrompt(lastUser.content, historyBeforeLastUser, lastUser.attachments);
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -1392,6 +1374,10 @@ function App({ user, signOut }: AppProps) {
                                     {att.pageCount
                                       ? ` · ${att.pageCount} pg`
                                       : ""}
+                                    {typeof att.wordCount === "number" &&
+                                    att.wordCount > 0
+                                      ? ` · ${att.wordCount} words`
+                                      : ""}
                                   </span>
                                 </div>
                                 <span
@@ -1519,6 +1505,10 @@ function App({ user, signOut }: AppProps) {
                         <span className="composer-pdf-size">
                           {formatFileSize(img.sizeBytes)}
                           {img.pageCount ? ` · ${img.pageCount} pg` : ""}
+                          {typeof img.wordCount === "number" &&
+                          img.wordCount > 0
+                            ? ` · ${img.wordCount} words read`
+                            : " · OCR ready"}
                         </span>
                       </div>
                       <button

@@ -143,22 +143,30 @@ function normalizeMessagesForBedrock(
       }
     }
 
+    const pdfTextBlocks = (m.attachments || [])
+      .filter((a) => Boolean(a.extractedText && a.extractedText.trim()))
+      .map(
+        (a, idx) =>
+          `=== ATTACHED PDF DOCUMENT ${idx + 1}: "${a.name}" (${
+            a.pageCount || 1
+          } page(s)) ===\n${a.extractedText!.trim()}\n=== END OF "${a.name}" ===`
+      )
+      .join("\n\n");
+
     const attachmentNote =
       m.attachments && m.attachments.length > 0
         ? `\n[Attached file(s): ${m.attachments
-            .map((a) => {
-              const baseInfo = `${a.name} (${a.mimeType}${
-                a.pageCount ? `, ${a.pageCount} page(s)` : ""
-              })`;
-              return a.extractedText
-                ? `${baseInfo}\nExtracted PDF Text Excerpt:\n${a.extractedText}`
-                : baseInfo;
-            })
-            .join("\n")}]`
+            .map((a) => `${a.name} (${a.mimeType})`)
+            .join(", ")}]`
         : "";
-    const text = `${(m.content || "").trim()}${
-      includeImageBytes ? "" : attachmentNote
-    }`.trim();
+
+    let text = (m.content || "").trim();
+    if (pdfTextBlocks && !text.includes("=== ATTACHED PDF DOCUMENT")) {
+      text = `${text}\n\n${pdfTextBlocks}`.trim();
+    }
+    if (!includeImageBytes && attachmentNote) {
+      text = `${text}${attachmentNote}`.trim();
+    }
 
     if (text && text !== "...") {
       blocks.push({ text });
@@ -211,7 +219,7 @@ async function invokeBedrockConverse(
     messages: normalizedMessages,
     inferenceConfig: {
       temperature: typeof temperature === "number" ? temperature : 0.7,
-      maxTokens: 2048,
+      maxTokens: 4096,
     },
   };
 

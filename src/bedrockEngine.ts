@@ -1,5 +1,6 @@
 import { generateClient } from "aws-amplify/data";
 import outputs from "../amplify_outputs.json";
+import { extractPdfContent } from "./pdfExtractor";
 
 interface AskGpt6SolGraphqlResponse {
   data?: {
@@ -37,7 +38,10 @@ export interface ChatImageAttachment {
   width?: number;
   height?: number;
   pageCount?: number;
+  wordCount?: number;
   extractedText?: string;
+  renderedPageImages?: string[];
+  pdfJsExtracted?: boolean;
 }
 
 export interface ChatMessage {
@@ -129,6 +133,104 @@ async function streamTextToCallback(
   return accumulated;
 }
 
+async function prepareMessagesWithPdfExtraction(
+  messages: BedrockQueryOptions["messages"]
+): Promise<BedrockQueryOptions["messages"]> {
+  const prepared: BedrockQueryOptions["messages"] = [];
+
+  for (const msg of messages) {
+    if (
+      msg.role !== "user" ||
+      !msg.attachments ||
+      msg.attachments.length === 0
+    ) {
+      prepared.push(msg);
+      continue;
+    }
+
+    const pdfSections: string[] = [];
+    const transportAttachments: ChatImageAttachment[] = [];
+    let pdfIndex = 0;
+
+    for (const att of msg.attachments) {
+      const isPdf =
+        att.mimeType === "application/pdf" || /\.pdf$/i.test(att.name || "");
+
+      if (!isPdf) {
+        transportAttachments.push(att);
+        continue;
+      }
+
+      pdfIndex++;
+      let extractedText = att.extractedText || "";
+      let pageCount = att.pageCount || 1;
+      let renderedPageImages = att.renderedPageImages || [];
+
+      // If this PDF was uploaded earlier or needs full PDF.js extraction, extract now from dataUrl
+      if ((!att.pdfJsExtracted || !extractedText.trim()) && att.dataUrl) {
+        try {
+          const parsed = await extractPdfContent(att.dataUrl);
+          extractedText = parsed.extractedText;
+          pageCount = parsed.pageCount;
+          renderedPageImages = parsed.renderedPageImages;
+          att.extractedText = extractedText;
+          att.pageCount = pageCount;
+          att.wordCount = parsed.wordCount;
+          att.renderedPageImages = renderedPageImages;
+          att.pdfJsExtracted = true;
+        } catch {
+          // Keep existing fields
+        }
+      }
+
+      if (extractedText.trim()) {
+        pdfSections.push(
+          [
+            `=== ATTACHED PDF DOCUMENT ${pdfIndex}: "${att.name}" (${pageCount} page(s)) ===`,
+            extractedText.trim(),
+            `=== END OF PDF DOCUMENT ${pdfIndex}: "${att.name}" ===`,
+          ].join("\n")
+        );
+      } else {
+        pdfSections.push(
+          `=== ATTACHED PDF DOCUMENT ${pdfIndex}: "${att.name}" (${pageCount} page(s), scanned/image PDF) ===`
+        );
+      }
+
+      // If the PDF had scanned pages rendered to JPEG, pass those as image attachments for Bedrock Vision OCR
+      if (renderedPageImages.length > 0) {
+        renderedPageImages.forEach((imgDataUrl, idx) => {
+          transportAttachments.push({
+            id: `${att.id}-page-${idx + 1}`,
+            name: `${att.name}-page-${idx + 1}.jpg`,
+            mimeType: "image/jpeg",
+            sizeBytes: imgDataUrl.length,
+            dataUrl: imgDataUrl,
+          });
+        });
+      }
+    }
+
+    const combinedContent =
+      pdfSections.length > 0
+        ? `${msg.content.trim()}\n\nThe user has attached ${
+            pdfSections.length
+          } PDF document(s). Full extracted text of each PDF is provided below:\n\n${pdfSections.join(
+            "\n\n"
+          )}`
+        : msg.content;
+
+    prepared.push({
+      role: msg.role,
+      content: combinedContent,
+      attachments:
+        transportAttachments.length > 0 ? transportAttachments : undefined,
+    });
+  }
+
+  return prepared;
+}
+
 export async function queryBedrockGpt6Sol(
   options: BedrockQueryOptions
 ): Promise<BedrockQueryResult> {
@@ -136,6 +238,8 @@ export async function queryBedrockGpt6Sol(
   const { messages, systemPrompt, temperature, signal, onToken } = options;
 
   try {
+    const preparedMessages = await prepareMessagesWithPdfExtraction(messages);
+
     let data: {
       reply: string;
       modelId: string;
@@ -150,7 +254,7 @@ export async function queryBedrockGpt6Sol(
     if (isAmplifyBackendConfigured()) {
       const client = generateClient() as unknown as AskGpt6SolClient;
       const response = await client.queries.askGpt6Sol({
-        messagesJson: JSON.stringify(messages),
+        messagesJson: JSON.stringify(preparedMessages),
         systemPrompt,
         temperature,
         mode: "bedrock",
@@ -165,7 +269,7 @@ export async function queryBedrockGpt6Sol(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messagesJson: JSON.stringify(messages),
+          messagesJson: JSON.stringify(preparedMessages),
           systemPrompt,
           temperature,
           mode: "bedrock",
