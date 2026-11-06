@@ -45,6 +45,8 @@ function localDriveFolderPlugin(): Plugin {
                   systemPrompt?: string | null;
                   temperature?: number | null;
                   mode?: string | null;
+                  inpContent?: string | null;
+                  inpFileName?: string | null;
                 };
                 const mod = await server.ssrLoadModule(
                   "/amplify/functions/bedrock-chat/handler.ts"
@@ -55,6 +57,8 @@ function localDriveFolderPlugin(): Plugin {
                     systemPrompt: payload.systemPrompt,
                     temperature: payload.temperature,
                     mode: "bedrock",
+                    inpContent: payload.inpContent,
+                    inpFileName: payload.inpFileName,
                   },
                 });
                 res.statusCode = 200;

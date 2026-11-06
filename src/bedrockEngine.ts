@@ -12,6 +12,8 @@ interface AskGpt6SolGraphqlResponse {
     promptTokens: number;
     completionTokens: number;
     errorDetail?: string | null;
+    updatedInpContent?: string | null;
+    updatedInpFileName?: string | null;
   } | null;
   errors?: Array<{ message: string }>;
 }
@@ -24,6 +26,19 @@ interface AskGpt6SolClient {
       temperature?: number;
       mode?: string;
     }) => Promise<AskGpt6SolGraphqlResponse>;
+  };
+  models?: {
+    Todo?: {
+      get: (args: { id: string }) => Promise<{
+        data?: { id: string; content?: string | null } | null;
+      }>;
+      create: (args: { id: string; content: string }) => Promise<{
+        data?: { id: string; content?: string | null } | null;
+      }>;
+      update: (args: { id: string; content: string }) => Promise<{
+        data?: { id: string; content?: string | null } | null;
+      }>;
+    };
   };
 }
 
@@ -76,6 +91,8 @@ export interface BedrockQueryOptions {
   systemPrompt: string;
   temperature: number;
   mode: ExecutionMode;
+  activeInpContent?: string;
+  activeInpFileName?: string;
   signal?: AbortSignal;
   onToken?: (partialText: string) => void;
 }
@@ -89,6 +106,8 @@ export interface BedrockQueryResult {
   promptTokens: number;
   completionTokens: number;
   errorDetail?: string | null;
+  updatedInpContent?: string | null;
+  updatedInpFileName?: string | null;
 }
 
 export const BEDROCK_ENGINE_CONFIG = {
@@ -273,14 +292,183 @@ async function prepareMessagesWithPdfExtraction(
   return prepared;
 }
 
+const AMPLIFY_ACTIVE_INP_RECORD_ID = "epanet-active-inp-v1";
+
+export async function syncInpToAmplifyBackend(
+  fileName: string,
+  inpContent: string
+): Promise<boolean> {
+  if (!isAmplifyBackendConfigured() || !inpContent.trim()) return false;
+  try {
+    const client = generateClient() as unknown as AskGpt6SolClient;
+    const todoModel = client.models?.Todo;
+    if (!todoModel) return false;
+
+    const payload = JSON.stringify({
+      type: "EPANET_INP",
+      fileName,
+      inpContent,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const existing = await todoModel.get({ id: AMPLIFY_ACTIVE_INP_RECORD_ID });
+    if (existing?.data?.id) {
+      await todoModel.update({
+        id: AMPLIFY_ACTIVE_INP_RECORD_ID,
+        content: payload,
+      });
+    } else {
+      await todoModel.create({
+        id: AMPLIFY_ACTIVE_INP_RECORD_ID,
+        content: payload,
+      });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function loadInpFromAmplifyBackend(): Promise<{
+  fileName: string;
+  inpContent: string;
+  updatedAt?: string;
+} | null> {
+  if (!isAmplifyBackendConfigured()) return null;
+  try {
+    const client = generateClient() as unknown as AskGpt6SolClient;
+    const todoModel = client.models?.Todo;
+    if (!todoModel) return null;
+
+    const existing = await todoModel.get({ id: AMPLIFY_ACTIVE_INP_RECORD_ID });
+    const rawContent = existing?.data?.content;
+    if (!rawContent) return null;
+
+    const parsed = JSON.parse(rawContent) as {
+      type?: string;
+      fileName?: string;
+      inpContent?: string;
+      updatedAt?: string;
+    };
+    if (parsed.type === "EPANET_INP" && parsed.inpContent) {
+      return {
+        fileName: parsed.fileName || "water_distribution_model.inp",
+        inpContent: parsed.inpContent,
+        updatedAt: parsed.updatedAt,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildSystemPromptWithActiveInp(
+  baseSystemPrompt: string,
+  activeInpContent?: string,
+  activeInpFileName?: string
+): string {
+  const trimmedBase = baseSystemPrompt.trim();
+  if (!activeInpContent || !activeInpContent.trim()) {
+    return trimmedBase;
+  }
+  const fileName = (activeInpFileName || "water_distribution_model.inp").trim();
+  return [
+    trimmedBase,
+    "",
+    `You have direct read and write access to the active EPANET 2.2 hydraulic model file "${fileName}" stored in the AWS Amplify backend.`,
+    "Whenever the user asks you to modify, update, edit, add, remove, open, close, or change any component, parameter, pipe diameter/roughness/status, junction elevation/demand, tank level/diameter, pump curve, reservoir head, valve, pattern, or option in the .inp file:",
+    "1. Briefly explain the exact modifications you made to the EPANET .inp model.",
+    `2. Output the COMPLETE modified EPANET 2.2 .inp file wrapped inside <UPDATED_EPANET_INP filename="${fileName}"> and </UPDATED_EPANET_INP> tags.`,
+    "3. Preserve all existing sections ([TITLE], [JUNCTIONS], [RESERVOIRS], [TANKS], [PIPES], [PUMPS], [VALVES], [STATUS], [PATTERNS], [CURVES], [TIMES], [REPORT], [OPTIONS], [COORDINATES], [VERTICES], [END]) and only change the lines requested by the user.",
+    "",
+    `<ACTIVE_EPANET_INP filename="${fileName}">`,
+    activeInpContent.trim(),
+    "</ACTIVE_EPANET_INP>",
+  ].join("\n");
+}
+
+function parseAndCleanUpdatedInpFromReply(
+  rawReply: string,
+  explicitUpdatedInp?: string | null,
+  explicitUpdatedName?: string | null,
+  defaultFileName?: string
+): {
+  cleanedReply: string;
+  updatedInpContent: string | null;
+  updatedInpFileName: string | null;
+} {
+  let updatedInpContent: string | null = explicitUpdatedInp?.trim() || null;
+  let updatedInpFileName: string | null =
+    explicitUpdatedName?.trim() || defaultFileName || null;
+
+  const tagRegex =
+    /<UPDATED_EPANET_INP(?:\s+filename="([^"]+)")?\s*>([\s\S]*?)<\/UPDATED_EPANET_INP>/i;
+  const tagMatch = rawReply.match(tagRegex);
+
+  if (tagMatch && tagMatch[2]?.trim()) {
+    const extracted = tagMatch[2]
+      .trim()
+      .replace(/^```(?:inp|epanet|txt|text)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+    if (extracted.includes("[JUNCTIONS]") || extracted.includes("[PIPES]")) {
+      updatedInpContent = extracted + "\n";
+      updatedInpFileName = (
+        tagMatch[1] ||
+        defaultFileName ||
+        "water_distribution_model.inp"
+      ).trim();
+    }
+  } else if (!updatedInpContent) {
+    const fenceMatch = rawReply.match(
+      /```(?:inp|epanet|txt|text)?\s*(\[TITLE\][\s\S]*?\[END\])\s*```/i
+    );
+    if (fenceMatch && fenceMatch[1]?.trim()) {
+      updatedInpContent = fenceMatch[1].trim() + "\n";
+      updatedInpFileName = (
+        defaultFileName || "water_distribution_model.inp"
+      ).trim();
+    }
+  }
+
+  let cleanedReply = rawReply.replace(tagRegex, "").trim();
+  if (updatedInpContent) {
+    const fileLabel = updatedInpFileName || "water_distribution_model.inp";
+    const badgeLine = `\n\n---\n✅ **AWS Bedrock Modified \`${fileLabel}\` in Amplify Backend** — The updated EPANET 2.2 \`.inp\` file has been synced to the right-hand **Built Model** panel and is ready to inspect or download.`;
+    if (!cleanedReply.includes("AWS Bedrock Modified")) {
+      cleanedReply = `${cleanedReply}${badgeLine}`.trim();
+    }
+  }
+
+  return {
+    cleanedReply,
+    updatedInpContent,
+    updatedInpFileName,
+  };
+}
+
 export async function queryBedrockGpt6Sol(
   options: BedrockQueryOptions
 ): Promise<BedrockQueryResult> {
   const startedAt = performance.now();
-  const { messages, systemPrompt, temperature, signal, onToken } = options;
+  const {
+    messages,
+    systemPrompt,
+    temperature,
+    activeInpContent,
+    activeInpFileName,
+    signal,
+    onToken,
+  } = options;
 
   try {
     const preparedMessages = await prepareMessagesWithPdfExtraction(messages);
+    const effectiveSystemPrompt = buildSystemPromptWithActiveInp(
+      systemPrompt,
+      activeInpContent,
+      activeInpFileName
+    );
 
     type RawBedrockResponse = NonNullable<AskGpt6SolGraphqlResponse["data"]>;
     let data: RawBedrockResponse | null = null;
@@ -297,9 +485,11 @@ export async function queryBedrockGpt6Sol(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             messagesJson: JSON.stringify(preparedMessages),
-            systemPrompt,
+            systemPrompt: effectiveSystemPrompt,
             temperature,
             mode: "bedrock",
+            inpContent: activeInpContent,
+            inpFileName: activeInpFileName,
           }),
           signal,
         });
@@ -319,7 +509,7 @@ export async function queryBedrockGpt6Sol(
       const client = generateClient() as unknown as AskGpt6SolClient;
       const response = await client.queries.askGpt6Sol({
         messagesJson: JSON.stringify(preparedMessages),
-        systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         temperature,
         mode: "bedrock",
       });
@@ -334,9 +524,11 @@ export async function queryBedrockGpt6Sol(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messagesJson: JSON.stringify(preparedMessages),
-          systemPrompt,
+          systemPrompt: effectiveSystemPrompt,
           temperature,
           mode: "bedrock",
+          inpContent: activeInpContent,
+          inpFileName: activeInpFileName,
         }),
         signal,
       });
@@ -349,7 +541,19 @@ export async function queryBedrockGpt6Sol(
     }
 
     if (data) {
-      const finalText = await streamTextToCallback(data.reply, onToken, signal);
+      const { cleanedReply, updatedInpContent, updatedInpFileName } =
+        parseAndCleanUpdatedInpFromReply(
+          data.reply,
+          data.updatedInpContent,
+          data.updatedInpFileName,
+          activeInpFileName
+        );
+
+      if (updatedInpContent && updatedInpFileName) {
+        void syncInpToAmplifyBackend(updatedInpFileName, updatedInpContent);
+      }
+
+      const finalText = await streamTextToCallback(cleanedReply, onToken, signal);
       return {
         reply: finalText,
         modelId: data.modelId || BEDROCK_ENGINE_CONFIG.modelId,
@@ -361,10 +565,12 @@ export async function queryBedrockGpt6Sol(
           data.latencyMs ?? Math.round(performance.now() - startedAt),
         promptTokens:
           data.promptTokens ??
-          estimateTokens(JSON.stringify(messages) + systemPrompt),
+          estimateTokens(JSON.stringify(messages) + effectiveSystemPrompt),
         completionTokens:
           data.completionTokens ?? estimateTokens(finalText),
         errorDetail: data.errorDetail,
+        updatedInpContent,
+        updatedInpFileName,
       };
     }
 

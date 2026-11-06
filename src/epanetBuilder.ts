@@ -317,30 +317,21 @@ export function auditWaterSystem(
     });
   }
 
-  // 1. Check DEM Folder setup
-  if (!demFolder.trim()) {
-    missingComponents.push("DEM Data Folder Path");
+  // 1. Check DEM Elevation Data (downloaded in memory via Download DEM button)
+  if (demTileNames.length === 0) {
     items.push({
       id: "dem-folder",
-      component: "DEM Elevation Folder",
-      status: "missing",
-      summary: "No DEM destination folder configured.",
-      recommendation: `Enter a DEM folder path (e.g., D:\\AI\\agent\\epanet-auto\\DEM) and click "Download DEM" (${DEM_DOWNLOAD_URL}) to fetch GeoTIFF elevation tiles.`,
-    });
-  } else if (demTileNames.length === 0) {
-    items.push({
-      id: "dem-folder",
-      component: "DEM Elevation Folder",
+      component: "DEM Elevation Data",
       status: "warning",
-      summary: `DEM folder set to "${demFolder.trim()}" (no local .tif files attached in browser; builder will sample DEM folder or fallback to GIS elevations).`,
-      recommendation: `Use the "Download DEM" button (${DEM_DOWNLOAD_URL}) if you still need LiDAR DEM GeoTIFF tiles for "${demFolder.trim()}".`,
+      summary: "No DEM GeoTIFF downloaded in memory yet (builder will sample DEM or fallback to GIS elevations).",
+      recommendation: `Click the "Download DEM" button in Step 2 (${DEM_DOWNLOAD_URL}) to fetch DEM elevation data into memory.`,
     });
   } else {
     items.push({
       id: "dem-folder",
-      component: "DEM Elevation Folder",
+      component: "DEM Elevation Data",
       status: "pass",
-      summary: `DEM folder "${demFolder.trim()}" configured with ${demTileNames.length} GeoTIFF tile(s) (${demTileNames.slice(0, 2).join(", ")}).`,
+      summary: `DEM GeoTIFF loaded in memory (${demTileNames.slice(0, 2).join(", ")}).`,
     });
   }
 
@@ -496,7 +487,7 @@ export function auditWaterSystem(
     `- **Audit Status:** **${overallStatus}**`,
     `- **Target State Plane CRS:** \`${targetCrs}\` (ftUS)`,
     `- **Water System JSON Folder:** \`${waterJsonFolder.trim() || "NOT CONFIGURED"}\``,
-    `- **DEM Data Folder:** \`${demFolder.trim() || "NOT CONFIGURED"}\` ([Download DEM Tiles](${DEM_DOWNLOAD_URL}))`,
+    `- **DEM Elevation Data:** \`${demTileNames.length > 0 ? demTileNames.join(", ") : "Ready via Cloud DEM"}\` ([Download DEM](${DEM_DOWNLOAD_URL}))`,
     "",
     "| Component | Status | Details |",
     "| --- | --- | --- |",
@@ -518,12 +509,12 @@ export function auditWaterSystem(
       "#### Missing Components to Resolve",
       ...missingComponents.map((mc) => `- ❌ **${mc}**`),
       "",
-      "**Action Required:** Upload the missing JSON layers in the right-hand panel (or click **Load Sample Water System** to test with a complete dataset), configure your **DEM Folder**, and click **Build**."
+      "**Action Required:** Upload the missing JSON layers in the right-hand panel (or click **Load Sample Water System** to test with a complete dataset), click **Download DEM** if needed, and click **Build**."
     );
   } else {
     mdLines.push(
       "",
-      "✅ **All required water system components (`pipe`, `tank`, `pump`, `water-demand`, `pressure-zone`) and DEM folder are ready!** Click **⚡ Build** in the right panel to run `build-epanet` and generate the `.inp` model."
+      "✅ **All required water system components (`pipe`, `tank`, `pump`, `water-demand`, `pressure-zone`) are ready!** Click **⚡ Build** in the right panel to run `build-epanet` and generate the `.inp` model."
     );
   }
 
@@ -1169,6 +1160,134 @@ export function buildEpanetModel(
   };
 }
 
+export function recalculateBuildResultFromInp(
+  inpContent: string,
+  prevResult?: BuildEpanetResult | null,
+  fileName?: string | null,
+  targetCrs: string = "EPSG:2264"
+): BuildEpanetResult {
+  const lines = inpContent.split(/\r?\n/);
+  let currentSection = "";
+  const junctionIds: string[] = [];
+  const reservoirIds: string[] = [];
+  const tankIds: string[] = [];
+  const pipeIds: string[] = [];
+  const pumpIds: string[] = [];
+  let openPipes = 0;
+  let closedBoundaryPipes = 0;
+  let totalDemandGpm = 0;
+  let demandMultiplier = 1.0;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith(";")) continue;
+    const secMatch = trimmed.match(/^\[([A-Za-z0-9_]+)\]$/);
+    if (secMatch) {
+      currentSection = secMatch[1].toUpperCase();
+      continue;
+    }
+
+    const withoutComment = trimmed.split(";")[0].trim();
+    if (!withoutComment) continue;
+    const cols = withoutComment.split(/\s+/);
+    if (cols.length === 0) continue;
+
+    if (currentSection === "JUNCTIONS" && cols.length >= 2) {
+      junctionIds.push(cols[0]);
+      const demandVal = Number(cols[2] ?? 0);
+      if (Number.isFinite(demandVal)) {
+        totalDemandGpm += demandVal;
+      }
+    } else if (currentSection === "RESERVOIRS" && cols.length >= 2) {
+      reservoirIds.push(cols[0]);
+    } else if (currentSection === "TANKS" && cols.length >= 2) {
+      tankIds.push(cols[0]);
+    } else if (currentSection === "PIPES" && cols.length >= 6) {
+      pipeIds.push(cols[0]);
+      const statusCol = (cols[7] || "OPEN").toUpperCase();
+      if (statusCol.startsWith("CLOS")) {
+        closedBoundaryPipes++;
+      } else {
+        openPipes++;
+      }
+    } else if (currentSection === "PUMPS" && cols.length >= 3) {
+      pumpIds.push(cols[0]);
+    } else if (currentSection === "OPTIONS" && cols.length >= 3) {
+      if (
+        cols[0].toLowerCase() === "demand" &&
+        cols[1].toLowerCase() === "multiplier"
+      ) {
+        const mult = Number(cols[2]);
+        if (Number.isFinite(mult) && mult > 0) {
+          demandMultiplier = mult;
+        }
+      }
+    }
+  }
+
+  const effectiveTotalDemand = Number(
+    (totalDemandGpm * demandMultiplier).toFixed(2)
+  );
+  const resolvedFileName = (
+    fileName ||
+    prevResult?.inpFileName ||
+    "water_distribution_model.inp"
+  ).trim();
+  const safeModelName = resolvedFileName.replace(/\.inp$/i, "");
+
+  const facilityIdRanges: Record<string, string> = {
+    Pipes:
+      pipeIds.length > 0
+        ? `${pipeIds[0]} – ${pipeIds[pipeIds.length - 1]}`
+        : prevResult?.facilityIdRanges.Pipes || "None",
+    Junctions:
+      junctionIds.length > 0
+        ? `${junctionIds[0]} – ${junctionIds[junctionIds.length - 1]}`
+        : prevResult?.facilityIdRanges.Junctions || "None",
+    Tanks:
+      tankIds.length > 0
+        ? `${tankIds[0]} – ${tankIds[tankIds.length - 1]}`
+        : prevResult?.facilityIdRanges.Tanks || "None",
+    Pumps:
+      pumpIds.length > 0
+        ? `${pumpIds[0]} – ${pumpIds[pumpIds.length - 1]}`
+        : prevResult?.facilityIdRanges.Pumps || "None",
+    WTP:
+      reservoirIds.length > 0
+        ? `${reservoirIds[0]} – ${reservoirIds[reservoirIds.length - 1]}`
+        : prevResult?.facilityIdRanges.WTP || "None",
+    Hydrants: prevResult?.facilityIdRanges.Hydrants || "None",
+    PressureZones: prevResult?.facilityIdRanges.PressureZones || "PZ01",
+  };
+
+  return {
+    modelName: safeModelName,
+    crs: prevResult?.crs || targetCrs,
+    inpContent,
+    inpFileName: resolvedFileName,
+    stats: {
+      junctions: junctionIds.length || prevResult?.stats.junctions || 0,
+      pipes: pipeIds.length || prevResult?.stats.pipes || 0,
+      tanks: tankIds.length || prevResult?.stats.tanks || 0,
+      tankConnectors: tankIds.length || prevResult?.stats.tankConnectors || 0,
+      pumps: pumpIds.length || prevResult?.stats.pumps || 0,
+      pumpCurves: pumpIds.length || prevResult?.stats.pumpCurves || 0,
+      wtpReservoirs:
+        reservoirIds.length || prevResult?.stats.wtpReservoirs || 0,
+      hydrants: prevResult?.stats.hydrants || 0,
+      pressureZones: prevResult?.stats.pressureZones || 1,
+      openPipes,
+      closedBoundaryPipes,
+      totalDemandGpm: effectiveTotalDemand,
+      demSampledNodes:
+        junctionIds.length || prevResult?.stats.demSampledNodes || 0,
+    },
+    facilityIdRanges,
+    markdownSummary: prevResult?.markdownSummary || "",
+  };
+}
+
 export function createSampleWaterSystemLayers(): Partial<
   Record<WaterLayerKey, UploadedLayerInfo>
 > {
@@ -1478,23 +1597,13 @@ function createFallbackGeoTiffBytes(width = 64, height = 64): Uint8Array {
   return new Uint8Array(buf);
 }
 
-function uint8ArrayToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const sub = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...sub);
-  }
-  return btoa(binary);
-}
-
 export async function downloadDemForWaterSystem(params: {
   layers: Partial<Record<WaterLayerKey, UploadedLayerInfo>>;
-  demFolder: string;
+  demFolder?: string;
   targetCrs: string;
   onProgress?: (progress: DemDownloadProgress) => void;
 }): Promise<DemDownloadResult> {
-  const { layers, demFolder, targetCrs, onProgress } = params;
+  const { layers, targetCrs, onProgress } = params;
   const emit = (
     percent: number,
     stage: string,
@@ -1569,24 +1678,6 @@ export async function downloadDemForWaterSystem(params: {
   const wktAoi = `SRID=4269;POLYGON((${ring4326
     .map(([x, y]) => `${x} ${y}`)
     .join(", ")}))`;
-  const noaaCompatibleGeoJson = JSON.stringify(
-    {
-      type: "FeatureCollection",
-      features: [
-        {
-          type: "Feature",
-          id: 1,
-          properties: { FID: 1, Id: 0 },
-          geometry: {
-            type: "Polygon",
-            coordinates: [ring4326],
-          },
-        },
-      ],
-    },
-    null,
-    2
-  );
 
   // Step 2: Query NOAA Digital Coast DEM service (backend of main.d3nvwo119rglg1.amplifyapp.com)
   emit(
@@ -1743,69 +1834,23 @@ export async function downloadDemForWaterSystem(params: {
     tifBytes = createFallbackGeoTiffBytes(128, 128);
   }
 
-  // Step 4: Save .tif to configured local DEM folder (or browser download on cloud)
+  // Step 4: Keep downloaded DEM GeoTIFF in memory (no local disk storage needed)
   emit(
     92,
-    "Saving DEM to Folder",
-    `Writing ${fileName} (${(tifBytes.byteLength / 1024).toFixed(1)} KB) to ${
-      demFolder.trim() || "DEM folder"
-    }...`,
+    "Loading DEM Raster in Memory",
+    `Indexing ${fileName} (${(tifBytes.byteLength / 1024).toFixed(1)} KB) in memory for elevation sampling...`,
     tifBytes.byteLength,
     tifBytes.byteLength
   );
 
-  let savedToDiskPath: string | null = null;
-  let tifFiles: string[] = [fileName];
-
-  try {
-    const saveResp = await fetch("/api/save-dem", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        folderPath: demFolder.trim() || "D:\\AI\\agent\\epanet-auto\\DEM",
-        fileName,
-        base64Data: uint8ArrayToBase64(tifBytes),
-        geojsonContent: noaaCompatibleGeoJson,
-      }),
-    });
-
-    if (saveResp.ok) {
-      const saveData = (await saveResp.json()) as {
-        saved?: boolean;
-        savedPath?: string;
-        tifFiles?: string[];
-      };
-      if (saveData.saved) {
-        savedToDiskPath = saveData.savedPath || null;
-        if (Array.isArray(saveData.tifFiles) && saveData.tifFiles.length > 0) {
-          tifFiles = saveData.tifFiles;
-        }
-      }
-    }
-  } catch {
-    // Running on deployed Amplify cloud without local Node middleware
-  }
-
-  // If not saved via local disk middleware, trigger direct browser file download
-  if (!savedToDiskPath) {
-    const blob = new Blob([tifBytes.buffer as ArrayBuffer], { type: "image/tiff" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  }
-
+  const savedToDiskPath: string | null = null;
+  const tifFiles: string[] = [fileName];
   const sizeMb = (tifBytes.byteLength / (1024 * 1024)).toFixed(2);
+
   emit(
     100,
     "Complete",
-    `Downloaded ${fileName} (${sizeMb} MB) to ${
-      savedToDiskPath || demFolder.trim() || "Downloads"
-    }`,
+    `Downloaded ${fileName} (${sizeMb} MB) into memory — ready for elevation sampling`,
     tifBytes.byteLength,
     tifBytes.byteLength
   );
@@ -1814,10 +1859,7 @@ export async function downloadDemForWaterSystem(params: {
     `### ✅ DEM GeoTIFF Download Complete (\`${fileName}\`)`,
     `- **NOAA Digital Coast Mission:** \`#${missionId}\` — **${missionTitle}** (\`${verticalDatum}\`)`,
     `- **Water System AOI (WGS84):** \`[${bbox4326.join(", ")}]\``,
-    `- **Downloaded File:** \`${fileName}\` (\`${sizeMb} MB\`, 32-bit Float GeoTIFF)`,
-    `- **Saved Destination:** \`${
-      savedToDiskPath || demFolder.trim() || "Browser Downloads"
-    }\``,
+    `- **Downloaded DEM Raster:** \`${fileName}\` (\`${sizeMb} MB\`, 32-bit Float GeoTIFF loaded in memory)`,
     s3BulkUrl ? `- **NOAA S3 Bulk Index:** [${s3BulkUrl}](${s3BulkUrl})` : "",
     `- **NOAA DEM Portal:** [${DEM_DOWNLOAD_URL}](${DEM_DOWNLOAD_URL})`,
     "",

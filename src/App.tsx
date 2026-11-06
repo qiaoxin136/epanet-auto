@@ -6,7 +6,9 @@ import {
   ChatMessage,
   ConversationThread,
   ExecutionMode,
+  loadInpFromAmplifyBackend,
   queryBedrockGpt6Sol,
+  syncInpToAmplifyBackend,
 } from "./bedrockEngine";
 import {
   AuditReport,
@@ -20,6 +22,7 @@ import {
   createSampleWaterSystemLayers,
   downloadDemForWaterSystem,
   parseWaterJsonFile,
+  recalculateBuildResultFromInp,
 } from "./epanetBuilder";
 import { extractPdfContent } from "./pdfExtractor";
 
@@ -406,7 +409,6 @@ function App({ user, signOut }: AppProps) {
   // Right-hand Water System & build-epanet Panel state
   const [modelName, setModelName] = useState<string>("water_distribution_model");
   const [targetCrs, setTargetCrs] = useState<string>("EPSG:2264");
-  const [demFolder, setDemFolder] = useState<string>("D:\\AI\\agent\\epanet-auto\\DEM");
   const [demTileNames, setDemTileNames] = useState<string[]>([]);
   const [isDownloadingDem, setIsDownloadingDem] = useState<boolean>(false);
   const [demDownloadProgress, setDemDownloadProgress] =
@@ -420,6 +422,9 @@ function App({ user, signOut }: AppProps) {
   >({});
   const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
   const [buildResult, setBuildResult] = useState<BuildEpanetResult | null>(null);
+  const [inpModifiedByBedrockAt, setInpModifiedByBedrockAt] = useState<
+    string | null
+  >(null);
   const [isBuildingModel, setIsBuildingModel] = useState<boolean>(false);
   const [buildProgressPercent, setBuildProgressPercent] = useState<number>(0);
   const [buildStageText, setBuildStageText] = useState<string>(
@@ -442,7 +447,6 @@ function App({ user, signOut }: AppProps) {
   const picInputRef = useRef<HTMLInputElement | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const folderJsonInputRef = useRef<HTMLInputElement | null>(null);
-  const demFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     try {
@@ -488,6 +492,28 @@ function App({ user, signOut }: AppProps) {
   useEffect(() => {
     bottomAnchorRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeThread?.messages]);
+
+  // Load any active .inp file stored in the AWS Amplify backend on startup
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const stored = await loadInpFromAmplifyBackend();
+      if (!cancelled && stored && stored.inpContent) {
+        setBuildResult((prev) =>
+          prev ??
+          recalculateBuildResultFromInp(
+            stored.inpContent,
+            null,
+            stored.fileName,
+            targetCrs
+          )
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [targetCrs]);
 
   function appendAgentConversationPair(userText: string, assistantMarkdown: string) {
     if (!activeThread) return;
@@ -725,45 +751,15 @@ function App({ user, signOut }: AppProps) {
     }
   }
 
-  function handleLoadSampleLayers() {
-    setUploadError(null);
-    const samples = createSampleWaterSystemLayers();
-    setWaterLayers(samples);
-    const nextJsonFolder =
-      waterJsonFolder.trim() || "D:\\AI\\agent\\epanet-auto\\water-json";
-    if (!waterJsonFolder.trim()) {
-      setWaterJsonFolder(nextJsonFolder);
-    }
-    if (!demFolder.trim()) {
-      setDemFolder("D:\\AI\\agent\\epanet-auto\\DEM");
-    }
-    setFolderScanStatus(`Loaded 7 sample layers from ${nextJsonFolder}`);
-    setDemTileNames(["USGS_1m_NC_Sanford_Tile1.tif", "USGS_1m_NC_Sanford_Tile2.tif"]);
-    const report = auditWaterSystem(
-      samples,
-      demFolder.trim() || "D:\\AI\\agent\\epanet-auto\\DEM",
-      ["USGS_1m_NC_Sanford_Tile1.tif", "USGS_1m_NC_Sanford_Tile2.tif"],
-      targetCrs,
-      nextJsonFolder
-    );
-    setAuditReport(report);
-  }
-
   async function handleDemDownloadClick() {
     if (isDownloadingDem) return;
-
-    let targetDemDir = demFolder.trim();
-    if (!targetDemDir) {
-      targetDemDir = "D:\\AI\\agent\\epanet-auto\\DEM";
-      setDemFolder(targetDemDir);
-    }
 
     setIsDownloadingDem(true);
     setDemDownloadError(null);
     setDemDownloadProgress({
       percent: 5,
       stage: "Initializing DEM Download",
-      detail: `Preparing DEM download for ${targetDemDir}...`,
+      detail: "Preparing DEM elevation download in memory...",
     });
 
     try {
@@ -782,7 +778,6 @@ function App({ user, signOut }: AppProps) {
 
       const result = await downloadDemForWaterSystem({
         layers: activeLayers,
-        demFolder: targetDemDir,
         targetCrs,
         onProgress: (prog) => {
           setDemDownloadProgress(prog);
@@ -794,7 +789,7 @@ function App({ user, signOut }: AppProps) {
       );
 
       appendAgentConversationPair(
-        `Download DEM GeoTIFF tiles from ${DEM_DOWNLOAD_URL} into ${targetDemDir}`,
+        `Download DEM GeoTIFF tiles from ${DEM_DOWNLOAD_URL}`,
         result.markdownSummary
       );
     } catch (err) {
@@ -818,14 +813,14 @@ function App({ user, signOut }: AppProps) {
 
     const report = auditWaterSystem(
       activeLayers,
-      demFolder,
+      "Cloud DEM (In-Memory)",
       demTileNames,
       targetCrs,
       waterJsonFolder
     );
     setAuditReport(report);
     appendAgentConversationPair(
-      "Audit water system JSON files and DEM folder for missing components.",
+      "Audit water system JSON files and DEM elevation readiness for missing components.",
       report.markdownReport
     );
   }
@@ -863,7 +858,7 @@ function App({ user, signOut }: AppProps) {
 
       const report = auditWaterSystem(
         activeLayers,
-        demFolder,
+        "Cloud DEM (In-Memory)",
         demTileNames,
         targetCrs,
         waterJsonFolder
@@ -898,7 +893,7 @@ function App({ user, signOut }: AppProps) {
       const built = buildEpanetModel(
         modelName,
         targetCrs,
-        demFolder,
+        demTileNames.length > 0 ? demTileNames.join(", ") : "Cloud DEM (In-Memory)",
         activeLayers,
         waterJsonFolder
       );
@@ -920,9 +915,7 @@ function App({ user, signOut }: AppProps) {
       setBuildProgressPercent(48);
       setBuildStageText("Step 3/6: Sampling DEM GeoTIFF Elevations...");
       setBuildDetailText(
-        `Sampling ground elevations from ${
-          demFolder.trim() || "DEM folder"
-        } for ${built.stats.demSampledNodes} nodes...`
+        `Sampling ground elevations in memory for ${built.stats.demSampledNodes} nodes...`
       );
       await pause(240);
 
@@ -1012,6 +1005,8 @@ function App({ user, signOut }: AppProps) {
         `Successfully built ${built.inpFileName} with ${built.stats.junctions} junctions, ${built.stats.pipes} pipes, ${built.stats.tanks} tank(s), and ${built.stats.pumps} pump(s).`
       );
       setBuildResult(built);
+      setInpModifiedByBedrockAt(null);
+      void syncInpToAmplifyBackend(built.inpFileName, built.inpContent);
 
       appendAgentConversationPair(
         `Run build-epanet agent to build ${built.inpFileName} (CRS ${targetCrs})`,
@@ -1067,12 +1062,36 @@ function App({ user, signOut }: AppProps) {
     }
     if (
       activeAttachments.length === 0 &&
-      lowerPrompt.includes("build") &&
-      lowerPrompt.includes(".inp")
+      (lowerPrompt === "build .inp" ||
+        lowerPrompt === "build model" ||
+        lowerPrompt === "run build-epanet")
     ) {
       setInput("");
       handleRunBuild();
       return;
+    }
+
+    // Ensure an active .inp model is available for AWS Bedrock to inspect or modify
+    let currentBuild = buildResult;
+    if (!currentBuild) {
+      const activeLayers =
+        Object.keys(waterLayers).length > 0
+          ? waterLayers
+          : createSampleWaterSystemLayers();
+      currentBuild = buildEpanetModel(
+        modelName,
+        targetCrs,
+        demTileNames.length > 0
+          ? demTileNames.join(", ")
+          : "Cloud DEM (In-Memory)",
+        activeLayers,
+        waterJsonFolder
+      );
+      setBuildResult(currentBuild);
+      void syncInpToAmplifyBackend(
+        currentBuild.inpFileName,
+        currentBuild.inpContent
+      );
     }
 
     const attachedImages = [...activeAttachments];
@@ -1143,6 +1162,8 @@ function App({ user, signOut }: AppProps) {
         systemPrompt,
         temperature,
         mode,
+        activeInpContent: currentBuild.inpContent,
+        activeInpFileName: currentBuild.inpFileName,
         signal: controller.signal,
         onToken: (partial) => {
           setThreads((prev) =>
@@ -1159,6 +1180,17 @@ function App({ user, signOut }: AppProps) {
           );
         },
       });
+
+      if (result.updatedInpContent) {
+        const updatedBuild = recalculateBuildResultFromInp(
+          result.updatedInpContent,
+          currentBuild,
+          result.updatedInpFileName || currentBuild.inpFileName,
+          targetCrs
+        );
+        setBuildResult(updatedBuild);
+        setInpModifiedByBedrockAt(new Date().toLocaleTimeString());
+      }
 
       setThreads((prev) =>
         prev.map((t) =>
@@ -1728,30 +1760,20 @@ function App({ user, signOut }: AppProps) {
               <span className="panel-card-title">
                 1. Water System JSON Inputs
               </span>
-              <div style={{ display: "flex", gap: "5px" }}>
+              {loadedLayersCount > 0 && (
                 <button
                   type="button"
                   className="layer-upload-btn"
-                  onClick={handleLoadSampleLayers}
-                  title="Load sample Tank, Pump, Pipe, Water Demand, Pressure Zone, WTP, and Hydrant JSON files"
+                  onClick={() => {
+                    setWaterLayers({});
+                    setAuditReport(null);
+                    setBuildResult(null);
+                    setFolderScanStatus(null);
+                  }}
                 >
-                  Load Sample JSONs
+                  Clear
                 </button>
-                {loadedLayersCount > 0 && (
-                  <button
-                    type="button"
-                    className="layer-upload-btn"
-                    onClick={() => {
-                      setWaterLayers({});
-                      setAuditReport(null);
-                      setBuildResult(null);
-                      setFolderScanStatus(null);
-                    }}
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
+              )}
             </div>
 
             <span className="panel-card-subtitle">
@@ -1898,72 +1920,10 @@ function App({ user, signOut }: AppProps) {
             </div>
           </div>
 
-          {/* Step 2: DEM Data Folder Setup & Download */}
+          {/* Step 2: DEM Download */}
           <div className="panel-card">
             <div className="panel-card-header">
-              <span className="panel-card-title">2. DEM Data Folder Setup</span>
-              <a
-                href={DEM_DOWNLOAD_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ fontSize: "0.73rem", color: "#0284c7" }}
-              >
-                Open DEM Portal ↗
-              </a>
-            </div>
-            <span className="panel-card-subtitle">
-              Set up your destination folder for DEM GeoTIFF (<code>.tif</code>)
-              elevation data before running <code>build-epanet</code>:
-            </span>
-            <div className="panel-input-row">
-              <input
-                type="text"
-                className="panel-text-input"
-                placeholder="Enter DEM folder path (e.g. D:\AI\agent\epanet-auto\DEM)"
-                value={demFolder}
-                onChange={(e) => setDemFolder(e.target.value)}
-              />
-              <button
-                type="button"
-                className="layer-upload-btn"
-                onClick={() => demFileInputRef.current?.click()}
-                title="Select local .tif DEM files"
-              >
-                + .tif
-              </button>
-              <input
-                ref={demFileInputRef}
-                type="file"
-                accept=".tif,.tiff"
-                multiple
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  if (e.target.files) {
-                    const names = Array.from(e.target.files).map((f) => f.name);
-                    setDemTileNames(names);
-                    e.target.value = "";
-                  }
-                }}
-              />
-            </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                fontSize: "0.72rem",
-                color: demFolder.trim() ? "#059669" : "#dc2626",
-              }}
-            >
-              <span>
-                {demFolder.trim()
-                  ? `✓ Folder: ${demFolder.trim()}${
-                      demTileNames.length > 0
-                        ? ` (${demTileNames.length} .tif files)`
-                        : ""
-                    }`
-                  : "⚠ Please configure a DEM destination folder"}
-              </span>
+              <span className="panel-card-title">2. DEM Data</span>
               <button
                 type="button"
                 className="layer-upload-btn"
@@ -2008,16 +1968,6 @@ function App({ user, signOut }: AppProps) {
             {demDownloadError && (
               <div style={{ fontSize: "0.73rem", color: "#dc2626" }}>
                 ⚠ DEM Download Error: {demDownloadError}
-              </div>
-            )}
-
-            {demTileNames.length > 0 && (
-              <div className="dem-files-badges">
-                {demTileNames.map((name) => (
-                  <span key={name} className="dem-file-chip">
-                    🗺️ {name}
-                  </span>
-                ))}
               </div>
             )}
           </div>
@@ -2172,6 +2122,18 @@ function App({ user, signOut }: AppProps) {
                   ⬇ Download .inp
                 </button>
               </div>
+              {inpModifiedByBedrockAt && (
+                <div
+                  style={{
+                    fontSize: "0.73rem",
+                    color: "#059669",
+                    fontWeight: 600,
+                  }}
+                >
+                  ✨ Modified by AWS Bedrock in Amplify Backend (
+                  {inpModifiedByBedrockAt})
+                </div>
+              )}
               <span className="panel-card-subtitle">
                 Junctions: <strong>{buildResult.stats.junctions}</strong> · Pipes:{" "}
                 <strong>{buildResult.stats.pipes}</strong> (OPEN:{" "}

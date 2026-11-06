@@ -29,6 +29,8 @@ interface AskGpt6SolEvent {
     systemPrompt?: string | null;
     temperature?: number | null;
     mode?: string | null;
+    inpContent?: string | null;
+    inpFileName?: string | null;
   };
 }
 
@@ -277,6 +279,82 @@ async function invokeBedrockConverse(
   return (await response.json()) as BedrockConverseResponse;
 }
 
+function buildSystemPromptWithInp(
+  baseSystemPrompt?: string | null,
+  inpContent?: string | null,
+  inpFileName?: string | null
+): string {
+  const base = (
+    baseSystemPrompt ||
+    "You are GPT-6 Sol (openai.gpt-6-sol) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
+  ).trim();
+
+  if (!inpContent || !inpContent.trim()) {
+    return base;
+  }
+
+  // Avoid duplicating if the client already appended <ACTIVE_EPANET_INP> into systemPrompt
+  if (base.includes("<ACTIVE_EPANET_INP")) {
+    return base;
+  }
+
+  const fileName = (inpFileName || "water_distribution_model.inp").trim();
+  return [
+    base,
+    "",
+    `You have direct read and write access to the active EPANET 2.2 hydraulic model file "${fileName}" in the AWS Amplify backend.`,
+    "Whenever the user asks you to modify, update, edit, add, remove, open, close, or change any component, parameter, pipe diameter/roughness/status, junction elevation/demand, tank level/diameter, pump curve, reservoir head, valve, pattern, or option in the .inp file:",
+    "1. Briefly explain the exact modifications you made to the EPANET model.",
+    `2. Output the COMPLETE modified EPANET 2.2 .inp file wrapped inside <UPDATED_EPANET_INP filename="${fileName}"> and </UPDATED_EPANET_INP> tags.`,
+    "3. Preserve all existing sections ([TITLE], [JUNCTIONS], [RESERVOIRS], [TANKS], [PIPES], [PUMPS], [VALVES], [STATUS], [PATTERNS], [CURVES], [TIMES], [REPORT], [OPTIONS], [COORDINATES], [VERTICES], [END]) and only change the lines requested by the user.",
+    "",
+    `<ACTIVE_EPANET_INP filename="${fileName}">`,
+    inpContent.trim(),
+    "</ACTIVE_EPANET_INP>",
+  ].join("\n");
+}
+
+function extractUpdatedInpFromReply(
+  replyText: string,
+  defaultFileName?: string | null
+): {
+  updatedInpContent: string | null;
+  updatedInpFileName: string | null;
+} {
+  const tagMatch = replyText.match(
+    /<UPDATED_EPANET_INP(?:\s+filename="([^"]+)")?\s*>([\s\S]*?)<\/UPDATED_EPANET_INP>/i
+  );
+  if (tagMatch && tagMatch[2]?.trim()) {
+    const cleaned = tagMatch[2]
+      .trim()
+      .replace(/^```(?:inp|epanet|txt|text)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+    if (cleaned.includes("[JUNCTIONS]") || cleaned.includes("[PIPES]")) {
+      return {
+        updatedInpContent: cleaned + "\n",
+        updatedInpFileName:
+          (tagMatch[1] || defaultFileName || "water_distribution_model.inp").trim(),
+      };
+    }
+  }
+
+  // Fallback: check if the model emitted a full EPANET .inp inside a markdown code fence
+  const fenceMatch = replyText.match(
+    /```(?:inp|epanet|txt|text)?\s*(\[TITLE\][\s\S]*?\[END\])\s*```/i
+  );
+  if (fenceMatch && fenceMatch[1]?.trim()) {
+    return {
+      updatedInpContent: fenceMatch[1].trim() + "\n",
+      updatedInpFileName: (
+        defaultFileName || "water_distribution_model.inp"
+      ).trim(),
+    };
+  }
+
+  return { updatedInpContent: null, updatedInpFileName: null };
+}
+
 export const handler = async (event: AskGpt6SolEvent) => {
   const startedAt = Date.now();
   const engineId = process.env.BEDROCK_ENGINE_ID || "openai.gpt-6-sol";
@@ -293,6 +371,12 @@ export const handler = async (event: AskGpt6SolEvent) => {
       { role: "user", content: String(event.arguments.messagesJson || "") },
     ];
   }
+
+  const effectiveSystemPrompt = buildSystemPromptWithInp(
+    event.arguments.systemPrompt,
+    event.arguments.inpContent,
+    event.arguments.inpFileName
+  );
 
   const hasImages = messages.some(
     (m) => m.attachments && m.attachments.length > 0
@@ -326,7 +410,7 @@ export const handler = async (event: AskGpt6SolEvent) => {
         region,
         attempt.model,
         messages,
-        event.arguments.systemPrompt,
+        effectiveSystemPrompt,
         event.arguments.temperature,
         attempt.withImages
       );
@@ -337,6 +421,9 @@ export const handler = async (event: AskGpt6SolEvent) => {
           .join("\n")
           .trim() || "No response text returned from Bedrock.";
 
+      const { updatedInpContent, updatedInpFileName } =
+        extractUpdatedInpFromReply(text, event.arguments.inpFileName);
+
       return {
         reply: text,
         modelId: engineId,
@@ -346,6 +433,8 @@ export const handler = async (event: AskGpt6SolEvent) => {
         promptTokens: result.usage?.inputTokens ?? 0,
         completionTokens: result.usage?.outputTokens ?? 0,
         errorDetail: null,
+        updatedInpContent,
+        updatedInpFileName,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -364,6 +453,8 @@ export const handler = async (event: AskGpt6SolEvent) => {
     promptTokens: 0,
     completionTokens: 0,
     errorDetail: errDetail,
+    updatedInpContent: null,
+    updatedInpFileName: null,
   };
 };
 

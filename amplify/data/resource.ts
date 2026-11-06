@@ -17,6 +17,8 @@ const schema = a.schema({
     promptTokens: a.integer(),
     completionTokens: a.integer(),
     errorDetail: a.string(),
+    updatedInpContent: a.string(),
+    updatedInpFileName: a.string(),
   }),
 
   askGpt6Sol: a
@@ -26,6 +28,8 @@ const schema = a.schema({
       systemPrompt: a.string(),
       temperature: a.float(),
       mode: a.string(),
+      inpContent: a.string(),
+      inpFileName: a.string(),
     })
     .returns(a.ref("BedrockChatResponse"))
     .authorization((allow) => [allow.authenticated(), allow.publicApiKey()])
