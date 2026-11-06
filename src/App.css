@@ -1477,6 +1477,92 @@
   font-weight: 600;
 }
 
+.build-steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.build-step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  transition: all 0.2s ease;
+}
+
+.build-step-item.running {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  box-shadow: 0 1px 4px rgba(14, 165, 233, 0.12);
+}
+
+.build-step-item.completed {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.build-step-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.build-step-item.running .build-step-icon {
+  background: #dbeafe;
+  border-color: #60a5fa;
+  color: #0284c7;
+}
+
+.build-step-item.completed .build-step-icon {
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #059669;
+}
+
+.build-step-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.build-step-title {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.3;
+}
+
+.build-step-item.running .build-step-title {
+  color: #0369a1;
+}
+
+.build-step-item.completed .build-step-title {
+  color: #065f46;
+}
+
+.build-step-detail {
+  font-size: 0.69rem;
+  color: #475569;
+  line-height: 1.35;
+}
+
 .user-auth-pill {
   display: inline-flex;
   align-items: center;

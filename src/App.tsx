@@ -24,6 +24,66 @@ import {
 
 const STORAGE_KEY = "epanet_auto_gpt6_sol_threads_v1";
 
+interface BuildStepItem {
+  id: string;
+  stepNumber: number;
+  title: string;
+  detail: string;
+  status: "pending" | "running" | "completed";
+}
+
+function createInitialBuildSteps(
+  targetCrs: string = "EPSG:2264",
+  modelName: string = "water_distribution_model"
+): BuildStepItem[] {
+  return [
+    {
+      id: "step-ingest",
+      stepNumber: 1,
+      title: "Ingest & Audit Water System JSON Layers",
+      detail: "Verify pipe, tank, pump, water demand, pressure zone, WTP & hydrant layers",
+      status: "pending",
+    },
+    {
+      id: "step-crs-ids",
+      stepNumber: 2,
+      title: "Reproject State Plane CRS & Standardize FacilityIDs",
+      detail: `Reproject to ${targetCrs || "EPSG:2264"} (ftUS) & assign P00001, N0001, T001, pump001, WTP001, H00001, PZ01`,
+      status: "pending",
+    },
+    {
+      id: "step-dem",
+      stepNumber: 3,
+      title: "Sample DEM GeoTIFF Elevations",
+      detail: "Extract ground elevations (ft) for junctions, storage tanks, and reservoirs",
+      status: "pending",
+    },
+    {
+      id: "step-topology",
+      stepNumber: 4,
+      title: "Build Pipe Topology & Auto-Connect Tanks / Pumps",
+      detail: "Snap pipe endpoints to junctions, add P_T001 tank leads & 3-point pump curves (C_pump001)",
+      status: "pending",
+    },
+    {
+      id: "step-demand-pz",
+      stepNumber: 5,
+      title: "Allocate Customer Demands & Close PZ Boundaries",
+      detail: "Allocate GPM/MGD demands to junctions; set interior pipes OPEN & boundary pipes CLOSED",
+      status: "pending",
+    },
+    {
+      id: "step-export-inp",
+      stepNumber: 6,
+      title: "Assemble & Validate EPANET 2.2 .inp File",
+      detail: `Write [JUNCTIONS], [TANKS], [PIPES], [PUMPS], [CURVES], [STATUS], [COORDINATES] to ${
+        modelName.trim() || "water_distribution_model"
+      }.inp`,
+      status: "pending",
+    },
+  ];
+}
+
 function createInitialThread(): ConversationThread {
   const now = new Date().toISOString();
   return {
@@ -314,6 +374,17 @@ function App({ user, signOut }: AppProps) {
   >({});
   const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
   const [buildResult, setBuildResult] = useState<BuildEpanetResult | null>(null);
+  const [isBuildingModel, setIsBuildingModel] = useState<boolean>(false);
+  const [buildProgressPercent, setBuildProgressPercent] = useState<number>(0);
+  const [buildStageText, setBuildStageText] = useState<string>(
+    "Ready to build EPANET .inp model"
+  );
+  const [buildDetailText, setBuildDetailText] = useState<string>(
+    "Click ⚡ Build to run the 6-step build-epanet hydraulic modeling pipeline."
+  );
+  const [buildSteps, setBuildSteps] = useState<BuildStepItem[]>(() =>
+    createInitialBuildSteps("EPSG:2264", "water_distribution_model")
+  );
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [folderScanStatus, setFolderScanStatus] = useState<string | null>(null);
   const [selectedDataFileKey, setSelectedDataFileKey] =
@@ -694,36 +765,195 @@ function App({ user, signOut }: AppProps) {
   }
 
   async function handleRunBuild() {
-    let activeLayers = waterLayers;
-    if (Object.keys(activeLayers).length === 0 && waterJsonFolder.trim()) {
-      const scanned = await scanLocalWaterJsonFolder(waterJsonFolder);
-      if (Object.keys(scanned).length > 0) {
-        activeLayers = { ...activeLayers, ...scanned };
+    if (isBuildingModel) return;
+
+    const pause = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    setIsBuildingModel(true);
+    const initialSteps = createInitialBuildSteps(targetCrs, modelName);
+    setBuildSteps(
+      initialSteps.map((s, idx) =>
+        idx === 0 ? { ...s, status: "running" } : { ...s, status: "pending" }
+      )
+    );
+    setBuildProgressPercent(12);
+    setBuildStageText("Step 1/6: Ingesting & Auditing Water System JSONs...");
+    setBuildDetailText(
+      `Scanning water system layers from ${
+        waterJsonFolder.trim() || "loaded browser layers"
+      }...`
+    );
+
+    try {
+      let activeLayers = waterLayers;
+      if (Object.keys(activeLayers).length === 0 && waterJsonFolder.trim()) {
+        const scanned = await scanLocalWaterJsonFolder(waterJsonFolder);
+        if (Object.keys(scanned).length > 0) {
+          activeLayers = { ...activeLayers, ...scanned };
+        }
       }
+      await pause(220);
+
+      const report = auditWaterSystem(
+        activeLayers,
+        demFolder,
+        demTileNames,
+        targetCrs,
+        waterJsonFolder
+      );
+      setAuditReport(report);
+      const layerCount = Object.keys(activeLayers).length;
+
+      // Advance to Step 2
+      setBuildSteps((prev) =>
+        prev.map((s, idx) => {
+          if (idx === 0) {
+            return {
+              ...s,
+              status: "completed",
+              detail: `Audited ${layerCount} layer(s) (${report.overallStatus})`,
+            };
+          }
+          if (idx === 1) return { ...s, status: "running" };
+          return s;
+        })
+      );
+      setBuildProgressPercent(30);
+      setBuildStageText(
+        `Step 2/6: Reprojecting to ${targetCrs} & Standardizing FacilityIDs...`
+      );
+      setBuildDetailText(
+        "Assigning sequential IDs: P00001…, N0001…, T001…, pump001…, WTP001…, H00001…, PZ01…"
+      );
+      await pause(240);
+
+      // Compute full build result so we can report exact stats across steps 2-6
+      const built = buildEpanetModel(
+        modelName,
+        targetCrs,
+        demFolder,
+        activeLayers,
+        waterJsonFolder
+      );
+
+      // Advance to Step 3: DEM Sampling
+      setBuildSteps((prev) =>
+        prev.map((s, idx) => {
+          if (idx === 1) {
+            return {
+              ...s,
+              status: "completed",
+              detail: `CRS ${built.crs} (ftUS) · Pipes ${built.facilityIdRanges.Pipes} · Nodes ${built.facilityIdRanges.Junctions}`,
+            };
+          }
+          if (idx === 2) return { ...s, status: "running" };
+          return s;
+        })
+      );
+      setBuildProgressPercent(48);
+      setBuildStageText("Step 3/6: Sampling DEM GeoTIFF Elevations...");
+      setBuildDetailText(
+        `Sampling ground elevations from ${
+          demFolder.trim() || "DEM folder"
+        } for ${built.stats.demSampledNodes} nodes...`
+      );
+      await pause(240);
+
+      // Advance to Step 4: Topology & Auto-Connect
+      setBuildSteps((prev) =>
+        prev.map((s, idx) => {
+          if (idx === 2) {
+            return {
+              ...s,
+              status: "completed",
+              detail: `Sampled elevations for ${built.stats.demSampledNodes} junctions & ${built.stats.tanks} tank(s)`,
+            };
+          }
+          if (idx === 3) return { ...s, status: "running" };
+          return s;
+        })
+      );
+      setBuildProgressPercent(66);
+      setBuildStageText(
+        "Step 4/6: Building Pipe Topology & Auto-Connecting Tanks / Pumps..."
+      );
+      setBuildDetailText(
+        `Connecting ${built.stats.pipes} pipes, ${built.stats.tanks} tank connector(s), and ${built.stats.pumps} pump curve(s)...`
+      );
+      await pause(240);
+
+      // Advance to Step 5: Demands & Pressure Zone Boundaries
+      setBuildSteps((prev) =>
+        prev.map((s, idx) => {
+          if (idx === 3) {
+            return {
+              ...s,
+              status: "completed",
+              detail: `${built.stats.junctions} junctions, ${built.stats.pipes} pipes, ${built.stats.tanks} tank leads, ${built.stats.pumpCurves} pump curves`,
+            };
+          }
+          if (idx === 4) return { ...s, status: "running" };
+          return s;
+        })
+      );
+      setBuildProgressPercent(84);
+      setBuildStageText(
+        "Step 5/6: Allocating Customer Demands & Closing PZ Boundaries..."
+      );
+      setBuildDetailText(
+        `Allocating ${built.stats.totalDemandGpm} GPM demand; setting ${built.stats.openPipes} OPEN & ${built.stats.closedBoundaryPipes} CLOSED boundary pipes...`
+      );
+      await pause(240);
+
+      // Advance to Step 6: Assemble .inp
+      setBuildSteps((prev) =>
+        prev.map((s, idx) => {
+          if (idx === 4) {
+            return {
+              ...s,
+              status: "completed",
+              detail: `Total demand: ${built.stats.totalDemandGpm} GPM · OPEN pipes: ${built.stats.openPipes} · Closed PZ boundary pipes: ${built.stats.closedBoundaryPipes}`,
+            };
+          }
+          if (idx === 5) return { ...s, status: "running" };
+          return s;
+        })
+      );
+      setBuildProgressPercent(95);
+      setBuildStageText(`Step 6/6: Exporting ${built.inpFileName}...`);
+      setBuildDetailText(
+        `Writing EPANET 2.2 sections to ${built.inpFileName}...`
+      );
+      await pause(200);
+
+      setBuildSteps((prev) =>
+        prev.map((s, idx) =>
+          idx === 5
+            ? {
+                ...s,
+                status: "completed",
+                detail: `Generated ${built.inpFileName} (${(
+                  built.inpContent.length / 1024
+                ).toFixed(1)} KB) — ready to download`,
+              }
+            : s
+        )
+      );
+      setBuildProgressPercent(100);
+      setBuildStageText(`Build Complete — ${built.inpFileName}`);
+      setBuildDetailText(
+        `Successfully built ${built.inpFileName} with ${built.stats.junctions} junctions, ${built.stats.pipes} pipes, ${built.stats.tanks} tank(s), and ${built.stats.pumps} pump(s).`
+      );
+      setBuildResult(built);
+
+      appendAgentConversationPair(
+        `Run build-epanet agent to build ${built.inpFileName} (CRS ${targetCrs})`,
+        built.markdownSummary
+      );
+    } finally {
+      setIsBuildingModel(false);
     }
-
-    const report = auditWaterSystem(
-      activeLayers,
-      demFolder,
-      demTileNames,
-      targetCrs,
-      waterJsonFolder
-    );
-    setAuditReport(report);
-
-    const built = buildEpanetModel(
-      modelName,
-      targetCrs,
-      demFolder,
-      activeLayers,
-      waterJsonFolder
-    );
-    setBuildResult(built);
-
-    appendAgentConversationPair(
-      `Run build-epanet agent to build ${built.inpFileName} (CRS ${targetCrs})`,
-      built.markdownSummary
-    );
   }
 
   function handleDownloadInpFile() {
@@ -1269,9 +1499,12 @@ function App({ user, signOut }: AppProps) {
               type="button"
               className="epanet-btn build-btn"
               onClick={handleRunBuild}
+              disabled={isBuildingModel}
               title="Run build-epanet agent to generate EPANET .inp model"
             >
-              ⚡ Build
+              {isBuildingModel
+                ? `⏳ ${buildProgressPercent}%`
+                : "⚡ Build"}
             </button>
           </div>
         </div>
@@ -1600,6 +1833,80 @@ function App({ user, signOut }: AppProps) {
                 value={targetCrs}
                 onChange={(e) => setTargetCrs(e.target.value)}
               />
+            </div>
+          </div>
+
+          {/* Step 4: Model Building Process & Steps */}
+          <div className="panel-card">
+            <div className="panel-card-header">
+              <span className="panel-card-title">
+                4. Model Building Progress &amp; Steps
+              </span>
+              <button
+                type="button"
+                className="layer-upload-btn"
+                onClick={handleRunBuild}
+                disabled={isBuildingModel}
+                title="Run 6-step build-epanet model building process"
+              >
+                {isBuildingModel
+                  ? `⏳ Building (${buildProgressPercent}%)...`
+                  : "⚡ Run Build"}
+              </button>
+            </div>
+
+            <div
+              className={`dem-progress-container ${
+                buildProgressPercent >= 100
+                  ? "completed"
+                  : isBuildingModel
+                  ? "active"
+                  : ""
+              }`}
+            >
+              <div className="dem-progress-header">
+                <span className="dem-progress-stage">
+                  {buildProgressPercent >= 100
+                    ? "✅ "
+                    : isBuildingModel
+                    ? "⏳ "
+                    : "⚙️ "}
+                  {buildStageText}
+                </span>
+                <span className="dem-progress-pct">{buildProgressPercent}%</span>
+              </div>
+              <div className="dem-progress-track">
+                <div
+                  className={`dem-progress-fill ${
+                    buildProgressPercent >= 100 ? "completed" : "active"
+                  }`}
+                  style={{ width: `${buildProgressPercent}%` }}
+                />
+              </div>
+              <div className="dem-progress-detail">{buildDetailText}</div>
+            </div>
+
+            <div className="build-steps-list">
+              {buildSteps.map((step) => (
+                <div
+                  key={step.id}
+                  className={`build-step-item ${step.status}`}
+                >
+                  <div className="build-step-icon">
+                    {step.status === "completed"
+                      ? "✅"
+                      : step.status === "running"
+                      ? "⏳"
+                      : step.stepNumber}
+                  </div>
+                  <div className="build-step-content">
+                    <div className="build-step-title">
+                      Step {step.stepNumber}: {step.title}
+                    </div>
+                    <div className="build-step-detail">{step.detail}</div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
