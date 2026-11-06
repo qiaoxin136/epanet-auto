@@ -122,19 +122,29 @@ async function fallbackExtractFlatePdfText(
 export async function extractPdfContent(
   input: ArrayBuffer | Uint8Array | string
 ): Promise<ExtractedPdfResult> {
-  const uint8 =
-    typeof input === "string"
-      ? base64DataUrlToUint8Array(input)
-      : input instanceof Uint8Array
-      ? new Uint8Array(input)
-      : new Uint8Array(input);
+  let uint8: Uint8Array;
+  if (typeof input === "string") {
+    if (input.startsWith("blob:") || input.startsWith("http://") || input.startsWith("https://")) {
+      const resp = await fetch(input);
+      const buf = await resp.arrayBuffer();
+      uint8 = new Uint8Array(buf);
+    } else {
+      uint8 = base64DataUrlToUint8Array(input);
+    }
+  } else {
+    uint8 = new Uint8Array(input);
+  }
 
   try {
     // Pass a copy because PDF.js transfers the underlying ArrayBuffer to its worker
     const loadingTask = pdfjsLib.getDocument({
       data: uint8.slice(0),
       useSystemFonts: true,
-      isEvalSupported: false,
+      isEvalSupported: true,
+      cMapUrl: "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/cmaps/",
+      cMapPacked: true,
+      standardFontDataUrl:
+        "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/standard_fonts/",
     });
     const pdfDoc = await loadingTask.promise;
     const numPages = pdfDoc.numPages || 1;
@@ -202,26 +212,40 @@ export async function extractPdfContent(
 
     const fullText = pageTexts.join("\n\n").slice(0, 28000);
 
-    // If the PDF is a scanned document with almost no selectable text, render up to 2 pages as images for Vision OCR
-    if (fullText.replace(/\s+/g, "").length < 40 && typeof document !== "undefined") {
-      const pagesToRender = Math.min(numPages, 2);
+    // Always render PDF pages (up to 5 pages per PDF) to high-contrast white-background JPEG images
+    // so AWS Bedrock Vision models can see all pictures, diagrams, charts, schematics, and scanned content
+    if (typeof document !== "undefined") {
+      const pagesToRender = Math.min(numPages, 5);
       for (let pageNum = 1; pageNum <= pagesToRender; pageNum++) {
         try {
           const page = await pdfDoc.getPage(pageNum);
-          const viewport = page.getViewport({ scale: 1.4 });
+          const unscaledViewport = page.getViewport({ scale: 1.0 });
+          const maxDim = Math.max(
+            unscaledViewport.width,
+            unscaledViewport.height,
+            1
+          );
+          // Target ~1200px on the longest edge for crisp OCR & diagram recognition while keeping payload fast
+          const targetScale = Math.min(2.0, Math.max(1.2, 1200 / maxDim));
+          const viewport = page.getViewport({ scale: targetScale });
+
           const canvas = document.createElement("canvas");
-          canvas.width = Math.min(1600, Math.round(viewport.width));
-          canvas.height = Math.min(2200, Math.round(viewport.height));
+          canvas.width = Math.round(viewport.width);
+          canvas.height = Math.round(viewport.height);
           const ctx = canvas.getContext("2d");
           if (ctx) {
+            // Fill with solid white background first so transparent PDF backgrounds never turn black in JPEG
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
             await page.render({
               canvasContext: ctx,
               viewport,
             }).promise;
-            renderedPageImages.push(canvas.toDataURL("image/jpeg", 0.82));
+            renderedPageImages.push(canvas.toDataURL("image/jpeg", 0.85));
           }
         } catch {
-          // Ignore canvas rendering failure
+          // Ignore individual page canvas rendering failure
         }
       }
     }

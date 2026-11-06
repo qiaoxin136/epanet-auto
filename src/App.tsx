@@ -448,7 +448,25 @@ function App({ user, signOut }: AppProps) {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(threads));
     } catch {
-      // Ignore storage quota errors
+      try {
+        const compactThreads = threads.map((t, idx) =>
+          idx === 0
+            ? t
+            : {
+                ...t,
+                messages: t.messages.map((m) => ({
+                  ...m,
+                  attachments: m.attachments?.map((a) => ({
+                    ...a,
+                    renderedPageImages: a.renderedPageImages?.slice(0, 1),
+                  })),
+                })),
+              }
+        );
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(compactThreads));
+      } catch {
+        // Ignore storage quota errors
+      }
     }
   }, [threads]);
 
@@ -1367,12 +1385,31 @@ function App({ user, signOut }: AppProps) {
                                 key={att.id}
                                 className="user-attachment-card pdf-card"
                               >
+                                {att.renderedPageImages &&
+                                  att.renderedPageImages.length > 0 && (
+                                    <img
+                                      src={att.renderedPageImages[0]}
+                                      alt={`${att.name} Page 1`}
+                                      style={{
+                                        width: "100%",
+                                        maxHeight: "110px",
+                                        objectFit: "contain",
+                                        background: "#ffffff",
+                                        borderRadius: "6px",
+                                        border: "1px solid #cbd5e1",
+                                      }}
+                                    />
+                                  )}
                                 <div className="user-pdf-header">
                                   <span className="user-pdf-icon">📄 PDF</span>
                                   <span className="user-pdf-meta">
                                     {formatFileSize(att.sizeBytes)}
                                     {att.pageCount
                                       ? ` · ${att.pageCount} pg`
+                                      : ""}
+                                    {att.renderedPageImages &&
+                                    att.renderedPageImages.length > 0
+                                      ? ` · 🖼️ ${att.renderedPageImages.length} visual pg`
                                       : ""}
                                     {typeof att.wordCount === "number" &&
                                     att.wordCount > 0
@@ -1497,7 +1534,23 @@ function App({ user, signOut }: AppProps) {
                 {pendingImages.map((img) =>
                   isPdfAttachment(img) ? (
                     <div key={img.id} className="composer-thumb pdf-thumb">
-                      <div className="composer-pdf-badge">📄 PDF</div>
+                      {img.renderedPageImages &&
+                      img.renderedPageImages.length > 0 ? (
+                        <img
+                          src={img.renderedPageImages[0]}
+                          alt={`${img.name} preview`}
+                          style={{
+                            width: "42px",
+                            height: "42px",
+                            objectFit: "cover",
+                            background: "#ffffff",
+                            borderRadius: "6px",
+                            border: "1px solid #93c5fd",
+                          }}
+                        />
+                      ) : (
+                        <div className="composer-pdf-badge">📄 PDF</div>
+                      )}
                       <div className="composer-pdf-info">
                         <span className="composer-thumb-name" title={img.name}>
                           {img.name}
@@ -1505,10 +1558,14 @@ function App({ user, signOut }: AppProps) {
                         <span className="composer-pdf-size">
                           {formatFileSize(img.sizeBytes)}
                           {img.pageCount ? ` · ${img.pageCount} pg` : ""}
+                          {img.renderedPageImages &&
+                          img.renderedPageImages.length > 0
+                            ? ` · 🖼️ ${img.renderedPageImages.length} visual pg(s)`
+                            : ""}
                           {typeof img.wordCount === "number" &&
                           img.wordCount > 0
-                            ? ` · ${img.wordCount} words read`
-                            : " · OCR ready"}
+                            ? ` · ${img.wordCount} words`
+                            : " · AI Vision ready"}
                         </span>
                       </div>
                       <button

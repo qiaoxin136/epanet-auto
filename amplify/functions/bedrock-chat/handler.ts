@@ -117,10 +117,20 @@ function normalizeMessagesForBedrock(
     const blocks: BedrockContentBlock[] = [];
 
     if (role === "user" && m.attachments && m.attachments.length > 0) {
-      for (const att of m.attachments) {
+      const hasAnyRasterImage = m.attachments.some((a) =>
+        Boolean(parseDataUrlImage(a))
+      );
+
+      for (let idx = 0; idx < m.attachments.length; idx++) {
+        const att = m.attachments[idx];
         if (includeImageBytes) {
           const parsedImg = parseDataUrlImage(att);
           if (parsedImg) {
+            blocks.push({
+              text: `[Attached Visual Image ${idx + 1}: "${
+                att.name || `Image ${idx + 1}`
+              }"]`,
+            });
             blocks.push({
               image: {
                 format: parsedImg.format,
@@ -129,15 +139,18 @@ function normalizeMessagesForBedrock(
             });
             continue;
           }
-          const parsedPdf = parseDataUrlPdf(att);
-          if (parsedPdf) {
-            blocks.push({
-              document: {
-                format: "pdf",
-                name: parsedPdf.name,
-                source: { bytes: parsedPdf.bytes },
-              },
-            });
+          // Only attach raw PDF document block if no rendered page images are present
+          if (!hasAnyRasterImage) {
+            const parsedPdf = parseDataUrlPdf(att);
+            if (parsedPdf) {
+              blocks.push({
+                document: {
+                  format: "pdf",
+                  name: parsedPdf.name,
+                  source: { bytes: parsedPdf.bytes },
+                },
+              });
+            }
           }
         }
       }
@@ -285,20 +298,24 @@ export const handler = async (event: AskGpt6SolEvent) => {
     (m) => m.attachments && m.attachments.length > 0
   );
 
-  // Live AWS Bedrock Only: try primary profile first, then live Bedrock fallback models if needed
-  const candidateAttempts: Array<{ model: string; withImages: boolean }> = [
-    { model: profileId, withImages: hasImages },
-    { model: "global.openai.gpt-6-sol", withImages: hasImages },
-    ...(hasImages
+  // Live AWS Bedrock Only: when images/PDF page visuals are attached, strictly use multimodal vision models
+  const candidateAttempts: Array<{ model: string; withImages: boolean }> =
+    hasImages
       ? [
+          { model: "us.meta.llama4-maverick-17b-instruct-v1:0", withImages: true },
           { model: "us.amazon.nova-pro-v1:0", withImages: true },
+          { model: "us.meta.llama4-scout-17b-instruct-v1:0", withImages: true },
+          { model: "us.amazon.nova-2-lite-v1:0", withImages: true },
           { model: "us.amazon.nova-lite-v1:0", withImages: true },
         ]
-      : []),
-    { model: "openai.gpt-oss-120b-1:0", withImages: false },
-    { model: "us.amazon.nova-pro-v1:0", withImages: false },
-    { model: "us.amazon.nova-lite-v1:0", withImages: false },
-  ];
+      : [
+          { model: profileId, withImages: false },
+          { model: "global.openai.gpt-6-sol", withImages: false },
+          { model: "openai.gpt-oss-120b-1:0", withImages: false },
+          { model: "us.meta.llama4-maverick-17b-instruct-v1:0", withImages: false },
+          { model: "us.amazon.nova-pro-v1:0", withImages: false },
+          { model: "us.amazon.nova-lite-v1:0", withImages: false },
+        ];
 
   let primaryError = "";
   let lastError = "";

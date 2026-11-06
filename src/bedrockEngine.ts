@@ -148,16 +148,22 @@ async function prepareMessagesWithPdfExtraction(
       continue;
     }
 
-    const pdfSections: string[] = [];
+    const pdfTextSections: string[] = [];
+    const visualImageLines: string[] = [];
     const transportAttachments: ChatImageAttachment[] = [];
     let pdfIndex = 0;
+    let attachedImageCounter = 0;
 
     for (const att of msg.attachments) {
       const isPdf =
         att.mimeType === "application/pdf" || /\.pdf$/i.test(att.name || "");
 
       if (!isPdf) {
+        attachedImageCounter++;
         transportAttachments.push(att);
+        visualImageLines.push(
+          `- Attached Image ${attachedImageCounter}: Picture file "${att.name}"`
+        );
         continue;
       }
 
@@ -166,8 +172,13 @@ async function prepareMessagesWithPdfExtraction(
       let pageCount = att.pageCount || 1;
       let renderedPageImages = att.renderedPageImages || [];
 
-      // If this PDF was uploaded earlier or needs full PDF.js extraction, extract now from dataUrl
-      if ((!att.pdfJsExtracted || !extractedText.trim()) && att.dataUrl) {
+      // Always extract/render if renderedPageImages are missing so previously uploaded PDFs in thread history also get rendered
+      if (
+        (!att.pdfJsExtracted ||
+          !renderedPageImages ||
+          renderedPageImages.length === 0) &&
+        att.dataUrl
+      ) {
         try {
           const parsed = await extractPdfContent(att.dataUrl);
           extractedText = parsed.extractedText;
@@ -183,42 +194,58 @@ async function prepareMessagesWithPdfExtraction(
         }
       }
 
-      if (extractedText.trim()) {
-        pdfSections.push(
-          [
-            `=== ATTACHED PDF DOCUMENT ${pdfIndex}: "${att.name}" (${pageCount} page(s)) ===`,
-            extractedText.trim(),
-            `=== END OF PDF DOCUMENT ${pdfIndex}: "${att.name}" ===`,
-          ].join("\n")
-        );
-      } else {
-        pdfSections.push(
-          `=== ATTACHED PDF DOCUMENT ${pdfIndex}: "${att.name}" (${pageCount} page(s), scanned/image PDF) ===`
-        );
-      }
-
-      // If the PDF had scanned pages rendered to JPEG, pass those as image attachments for Bedrock Vision OCR
       if (renderedPageImages.length > 0) {
         renderedPageImages.forEach((imgDataUrl, idx) => {
+          attachedImageCounter++;
           transportAttachments.push({
             id: `${att.id}-page-${idx + 1}`,
-            name: `${att.name}-page-${idx + 1}.jpg`,
+            name: `${att.name} (Page ${idx + 1} of ${pageCount})`,
             mimeType: "image/jpeg",
             sizeBytes: imgDataUrl.length,
             dataUrl: imgDataUrl,
           });
+          visualImageLines.push(
+            `- Attached Image ${attachedImageCounter}: High-resolution visual page rendering of PDF ${pdfIndex} "${att.name}" (Page ${
+              idx + 1
+            } of ${pageCount})`
+          );
         });
+      }
+
+      if (extractedText.trim()) {
+        pdfTextSections.push(
+          [
+            `=== SELECTABLE TEXT LAYER FROM PDF ${pdfIndex}: "${att.name}" (${pageCount} page(s)) ===`,
+            extractedText.trim(),
+            `=== END OF SELECTABLE TEXT FROM "${att.name}" ===`,
+          ].join("\n")
+        );
       }
     }
 
-    const combinedContent =
-      pdfSections.length > 0
-        ? `${msg.content.trim()}\n\nThe user has attached ${
-            pdfSections.length
-          } PDF document(s). Full extracted text of each PDF is provided below:\n\n${pdfSections.join(
-            "\n\n"
-          )}`
-        : msg.content;
+    let combinedContent = msg.content.trim();
+    if (pdfIndex > 0) {
+      const promptParts: string[] = [
+        combinedContent || "Please read and analyze the attached PDF file(s).",
+        "",
+        "IMPORTANT VISUAL INSPECTION INSTRUCTIONS:",
+        `The user attached ${pdfIndex} PDF document(s). Every page has been rendered into a high-resolution image and attached directly to this message:`,
+        ...visualImageLines,
+        "",
+        "Please visually inspect each attached image carefully and describe/analyze all pictures, photographs, diagrams, engineering schematics, charts, maps, shapes, colors, labels, and visual details shown in each PDF.",
+      ];
+
+      if (pdfTextSections.length > 0) {
+        promptParts.push(
+          "",
+          "In addition to the visual page images above, here is the selectable text layer extracted from the PDF(s):",
+          "",
+          pdfTextSections.join("\n\n")
+        );
+      }
+
+      combinedContent = promptParts.join("\n");
+    }
 
     prepared.push({
       role: msg.role,
@@ -226,6 +253,21 @@ async function prepareMessagesWithPdfExtraction(
       attachments:
         transportAttachments.length > 0 ? transportAttachments : undefined,
     });
+  }
+
+  // Keep image bytes focused on the most recent turn(s) (up to 10 images total) so multi-turn threads stay fast and under payload limits
+  let remainingImageBudget = 10;
+  for (let i = prepared.length - 1; i >= 0; i--) {
+    const turn = prepared[i];
+    if (!turn.attachments || turn.attachments.length === 0) continue;
+    if (remainingImageBudget <= 0) {
+      turn.attachments = undefined;
+    } else if (turn.attachments.length > remainingImageBudget) {
+      turn.attachments = turn.attachments.slice(0, remainingImageBudget);
+      remainingImageBudget = 0;
+    } else {
+      remainingImageBudget -= turn.attachments.length;
+    }
   }
 
   return prepared;
@@ -240,18 +282,40 @@ export async function queryBedrockGpt6Sol(
   try {
     const preparedMessages = await prepareMessagesWithPdfExtraction(messages);
 
-    let data: {
-      reply: string;
-      modelId: string;
-      inferenceProfileId: string;
-      source: string;
-      latencyMs: number;
-      promptTokens: number;
-      completionTokens: number;
-      errorDetail?: string | null;
-    } | null = null;
+    type RawBedrockResponse = NonNullable<AskGpt6SolGraphqlResponse["data"]>;
+    let data: RawBedrockResponse | null = null;
 
-    if (isAmplifyBackendConfigured()) {
+    const isLocalhost =
+      typeof window !== "undefined" &&
+      (window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1");
+
+    if (isLocalhost) {
+      try {
+        const localResp = await fetch("/api/bedrock-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messagesJson: JSON.stringify(preparedMessages),
+            systemPrompt,
+            temperature,
+            mode: "bedrock",
+          }),
+          signal,
+        });
+
+        if (localResp.ok) {
+          const parsedLocal = (await localResp.json()) as RawBedrockResponse;
+          if (parsedLocal && parsedLocal.source !== "bedrock-error") {
+            data = parsedLocal;
+          }
+        }
+      } catch {
+        // Fall through to Amplify AppSync client if local middleware is unavailable
+      }
+    }
+
+    if (!data && isAmplifyBackendConfigured()) {
       const client = generateClient() as unknown as AskGpt6SolClient;
       const response = await client.queries.askGpt6Sol({
         messagesJson: JSON.stringify(preparedMessages),
@@ -264,7 +328,7 @@ export async function queryBedrockGpt6Sol(
         throw new Error(response.errors.map((e) => e.message).join("; "));
       }
       data = response.data ?? null;
-    } else {
+    } else if (!data) {
       const localResp = await fetch("/api/bedrock-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -281,7 +345,7 @@ export async function queryBedrockGpt6Sol(
         const errBody = await localResp.text();
         throw new Error(`Bedrock proxy HTTP ${localResp.status}: ${errBody}`);
       }
-      data = (await localResp.json()) as NonNullable<typeof data>;
+      data = (await localResp.json()) as RawBedrockResponse;
     }
 
     if (data) {
