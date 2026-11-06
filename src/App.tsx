@@ -401,7 +401,7 @@ function App({ user, signOut }: AppProps) {
   const mode: ExecutionMode = "bedrock";
   const [temperature, setTemperature] = useState<number>(0.7);
   const [systemPrompt, setSystemPrompt] = useState<string>(
-    "You are GPT-6 Sol (openai.gpt-6-sol) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
+    "You are Claude Opus 5 (anthropic.claude-opus-5) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
   );
   const [showSettings, setShowSettings] = useState<boolean>(false);
   const [copiedSnippet, setCopiedSnippet] = useState<string | null>(null);
@@ -423,6 +423,10 @@ function App({ user, signOut }: AppProps) {
   const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
   const [buildResult, setBuildResult] = useState<BuildEpanetResult | null>(null);
   const [inpModifiedByBedrockAt, setInpModifiedByBedrockAt] = useState<
+    string | null
+  >(null);
+  const [isUploadingInp, setIsUploadingInp] = useState<boolean>(false);
+  const [inpUploadedToBackendAt, setInpUploadedToBackendAt] = useState<
     string | null
   >(null);
   const [isBuildingModel, setIsBuildingModel] = useState<boolean>(false);
@@ -447,6 +451,7 @@ function App({ user, signOut }: AppProps) {
   const picInputRef = useRef<HTMLInputElement | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const folderJsonInputRef = useRef<HTMLInputElement | null>(null);
+  const inpFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     try {
@@ -1032,6 +1037,60 @@ function App({ user, signOut }: AppProps) {
     URL.revokeObjectURL(url);
   }
 
+  async function handleUploadInpFile(file: File) {
+    setIsUploadingInp(true);
+    setUploadError(null);
+    try {
+      const rawText = await file.text();
+      if (!rawText.trim()) {
+        setUploadError(`Selected file "${file.name}" is empty.`);
+        return;
+      }
+      const cleanFileName = file.name.toLowerCase().endsWith(".inp")
+        ? file.name
+        : `${file.name.replace(/\.[^.]+$/, "")}.inp`;
+      const parsedResult = recalculateBuildResultFromInp(
+        rawText,
+        buildResult,
+        cleanFileName,
+        targetCrs
+      );
+      setModelName(cleanFileName.replace(/\.inp$/i, ""));
+      setBuildResult(parsedResult);
+      setInpModifiedByBedrockAt(null);
+
+      const synced = await syncInpToAmplifyBackend(cleanFileName, rawText);
+      const ts = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+      setInpUploadedToBackendAt(
+        synced
+          ? `${cleanFileName} uploaded to AWS Amplify Backend (${ts})`
+          : `${cleanFileName} loaded & queued for AWS Amplify Backend (${ts})`
+      );
+
+      appendAgentConversationPair(
+        `Upload EPANET .inp file "${cleanFileName}" to AWS Amplify backend`,
+        [
+          `### ☁️ Uploaded \`${cleanFileName}\` to AWS Amplify Backend`,
+          "",
+          `- **File Size:** \`${(rawText.length / 1024).toFixed(1)} KB\``,
+          `- **Junctions:** \`${parsedResult.stats.junctions}\` · **Pipes:** \`${parsedResult.stats.pipes}\` (\`OPEN\`: ${parsedResult.stats.openPipes}, \`CLOSED\`: ${parsedResult.stats.closedBoundaryPipes})`,
+          `- **Tanks:** \`${parsedResult.stats.tanks}\` · **Pumps:** \`${parsedResult.stats.pumps}\` · **Total Demand:** \`${parsedResult.stats.totalDemandGpm} GPM\``,
+          "",
+          `\`${cleanFileName}\` is now stored in the AWS Amplify backend and connected to **Claude Opus 5 (\`anthropic.claude-opus-5\`)**. You can ask the AI in this chat to inspect or modify any section of the \`.inp\` file.`,
+        ].join("\n")
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setUploadError(`Failed to upload "${file.name}": ${msg}`);
+    } finally {
+      setIsUploadingInp(false);
+    }
+  }
+
   async function sendPrompt(
     promptText: string,
     existingHistory?: ChatMessage[],
@@ -1256,7 +1315,7 @@ function App({ user, signOut }: AppProps) {
         <div className="sidebar-top">
           <button type="button" className="new-chat-btn" onClick={handleNewChat}>
             <span className="new-chat-btn-left">
-              <span className="brand-dot">G6</span>
+              <span className="brand-dot">C5</span>
               <span>New chat</span>
             </span>
             <span>+</span>
@@ -1307,7 +1366,7 @@ function App({ user, signOut }: AppProps) {
         {isDraggingPic && (
           <div className="pic-drop-overlay">
             <span>
-              🖼️ / 📄 Drop picture or PDF file here to attach to GPT-6 Sol
+              🖼️ / 📄 Drop picture or PDF file here to attach to Claude Opus 5
               conversation
             </span>
             <span style={{ fontSize: "0.82rem", color: "#047857" }}>
@@ -1394,11 +1453,11 @@ function App({ user, signOut }: AppProps) {
         <div className="chat-viewport">
           {!activeThread || activeThread.messages.length === 0 ? (
             <div className="welcome-container">
-              <div className="welcome-logo">G6</div>
+              <div className="welcome-logo">C5</div>
               <h1 className="welcome-title">What can I help with?</h1>
               <p className="welcome-subtitle">
-                Conversational AI powered by <strong>OpenAI GPT-6 Sol</strong> (
-                <code>openai.gpt-6-sol</code>) + <strong>build-epanet</strong> agent.
+                Conversational AI powered by <strong>Anthropic Claude Opus 5</strong> (
+                <code>anthropic.claude-opus-5</code>) + <strong>build-epanet</strong> agent.
                 Drop any picture file here or configure your water system JSON layers
                 on the right panel.
               </p>
@@ -1481,7 +1540,7 @@ function App({ user, signOut }: AppProps) {
                   </div>
                 ) : (
                   <div key={msg.id} className="message-row assistant">
-                    <div className="assistant-avatar">G6</div>
+                    <div className="assistant-avatar">C5</div>
                     <div className="assistant-body">
                       <FormattedMarkdown
                         content={msg.content}
@@ -1639,7 +1698,7 @@ function App({ user, signOut }: AppProps) {
               ref={textareaRef}
               rows={2}
               className="composer-textarea"
-              placeholder="Message GPT-6 Sol (openai.gpt-6-sol) or drop a picture / PDF file here..."
+              placeholder="Message Claude Opus 5 (anthropic.claude-opus-5) or drop a picture / PDF file here..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -1697,8 +1756,8 @@ function App({ user, signOut }: AppProps) {
             </div>
           </div>
           <div className="composer-footer-note">
-            AWS Bedrock Engine: <code>openai.gpt-6-sol</code> (Profile:{" "}
-            <code>us.openai.gpt-6-sol</code>) · Agent: <code>build-epanet</code>
+            AWS Bedrock Engine: <code>anthropic.claude-opus-5</code> (Profile:{" "}
+            <code>us.anthropic.claude-opus-5</code>) · Agent: <code>build-epanet</code>
           </div>
         </footer>
       </main>
@@ -1711,46 +1770,45 @@ function App({ user, signOut }: AppProps) {
           <div className="right-panel-title-row">
             <div className="right-panel-title">
               <span>💧 Water System Studio</span>
-              <span className="agent-badge">build-epanet</span>
+              <button
+                type="button"
+                className="agent-badge inp-upload-btn"
+                onClick={() => inpFileInputRef.current?.click()}
+                disabled={isUploadingInp}
+                title="Upload an EPANET .inp file to the AWS Amplify backend"
+              >
+                {isUploadingInp ? "⏳ Uploading..." : "inp Upload"}
+              </button>
+              <input
+                ref={inpFileInputRef}
+                type="file"
+                accept=".inp,.txt"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    void handleUploadInpFile(file);
+                    e.target.value = "";
+                  }
+                }}
+              />
             </div>
             <span style={{ fontSize: "0.73rem", color: "#64748b" }}>
               {loadedLayersCount}/7 layers
             </span>
           </div>
-
-          {/* Primary Action Buttons: DEM Download, Audit, Build */}
-          <div className="right-action-bar">
-            <button
-              type="button"
-              className="epanet-btn dem-btn"
-              onClick={handleDemDownloadClick}
-              disabled={isDownloadingDem}
-              title={`Download DEM tiles from ${DEM_DOWNLOAD_URL}`}
+          {inpUploadedToBackendAt && (
+            <div
+              style={{
+                fontSize: "0.72rem",
+                color: "#047857",
+                fontWeight: 600,
+                marginTop: "2px",
+              }}
             >
-              {isDownloadingDem
-                ? `⏳ ${demDownloadProgress?.percent ?? 0}%`
-                : "⬇ DEM Download"}
-            </button>
-            <button
-              type="button"
-              className="epanet-btn audit-btn"
-              onClick={handleRunAudit}
-              title="Audit water system JSON layers and DEM folder for missing components"
-            >
-              🔍 Audit
-            </button>
-            <button
-              type="button"
-              className="epanet-btn build-btn"
-              onClick={handleRunBuild}
-              disabled={isBuildingModel}
-              title="Run build-epanet agent to generate EPANET .inp model"
-            >
-              {isBuildingModel
-                ? `⏳ ${buildProgressPercent}%`
-                : "⚡ Build"}
-            </button>
-          </div>
+              ☁️ {inpUploadedToBackendAt}
+            </div>
+          )}
         </div>
 
         <div className="right-panel-body">

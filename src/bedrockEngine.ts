@@ -111,11 +111,11 @@ export interface BedrockQueryResult {
 }
 
 export const BEDROCK_ENGINE_CONFIG = {
-  provider: "OpenAI (via AWS Bedrock)",
-  modelName: "GPT-6 Sol",
-  modelId: "openai.gpt-6-sol",
-  inferenceProfileId: "us.openai.gpt-6-sol",
-  globalProfileId: "global.openai.gpt-6-sol",
+  provider: "Anthropic (via AWS Bedrock)",
+  modelName: "Claude Opus 5",
+  modelId: "anthropic.claude-opus-5",
+  inferenceProfileId: "us.anthropic.claude-opus-5",
+  globalProfileId: "global.anthropic.claude-opus-5",
   region: "us-east-2",
 } as const;
 

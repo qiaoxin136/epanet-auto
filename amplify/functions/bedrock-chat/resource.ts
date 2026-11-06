@@ -6,8 +6,8 @@ export const bedrockChat = defineFunction({
   timeoutSeconds: 60,
   memoryMB: 512,
   environment: {
-    BEDROCK_ENGINE_ID: "openai.gpt-6-sol",
-    BEDROCK_INFERENCE_PROFILE_ID: "us.openai.gpt-6-sol",
+    BEDROCK_ENGINE_ID: "anthropic.claude-opus-5",
+    BEDROCK_INFERENCE_PROFILE_ID: "us.anthropic.claude-opus-5",
     BEDROCK_REGION: "us-east-2",
   },
 });
