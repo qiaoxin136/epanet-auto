@@ -1246,87 +1246,11 @@ function App({ user, signOut }: AppProps) {
         </div>
 
         <div className="right-panel-body">
-          {/* Step 1: DEM Data Folder Setup & Download */}
-          <div className="panel-card">
-            <div className="panel-card-header">
-              <span className="panel-card-title">1. DEM Data Folder Setup</span>
-              <a
-                href={DEM_DOWNLOAD_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ fontSize: "0.73rem", color: "#0284c7" }}
-              >
-                Open DEM Portal ↗
-              </a>
-            </div>
-            <span className="panel-card-subtitle">
-              Set up your destination folder for DEM GeoTIFF (<code>.tif</code>)
-              elevation data before running <code>build-epanet</code>:
-            </span>
-            <div className="panel-input-row">
-              <input
-                type="text"
-                className="panel-text-input"
-                placeholder="Enter DEM folder path (e.g. D:\AI\agent\epanet-auto\DEM)"
-                value={demFolder}
-                onChange={(e) => setDemFolder(e.target.value)}
-              />
-              <button
-                type="button"
-                className="layer-upload-btn"
-                onClick={() => demFileInputRef.current?.click()}
-                title="Select local .tif DEM files"
-              >
-                + .tif
-              </button>
-              <input
-                ref={demFileInputRef}
-                type="file"
-                accept=".tif,.tiff"
-                multiple
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  if (e.target.files) {
-                    const names = Array.from(e.target.files).map((f) => f.name);
-                    setDemTileNames(names);
-                    e.target.value = "";
-                  }
-                }}
-              />
-            </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                fontSize: "0.72rem",
-                color: demFolder.trim() ? "#059669" : "#dc2626",
-              }}
-            >
-              <span>
-                {demFolder.trim()
-                  ? `✓ Folder: ${demFolder.trim()}${
-                      demTileNames.length > 0
-                        ? ` (${demTileNames.length} .tif files)`
-                        : ""
-                    }`
-                  : "⚠ Please configure a DEM destination folder"}
-              </span>
-              <button
-                type="button"
-                className="layer-upload-btn"
-                onClick={handleDemDownloadClick}
-              >
-                Download DEM ↗
-              </button>
-            </div>
-          </div>
-
-          {/* Step 2: Water System JSON Inputs */}
+          {/* Step 1: Water System JSON Inputs */}
           <div className="panel-card">
             <div className="panel-card-header">
               <span className="panel-card-title">
-                2. Water System JSON Inputs
+                1. Water System JSON Inputs
               </span>
               <div style={{ display: "flex", gap: "5px" }}>
                 <button
@@ -1495,6 +1419,82 @@ function App({ user, signOut }: AppProps) {
                   )
                 )}
               </div>
+            </div>
+          </div>
+
+          {/* Step 2: DEM Data Folder Setup & Download */}
+          <div className="panel-card">
+            <div className="panel-card-header">
+              <span className="panel-card-title">2. DEM Data Folder Setup</span>
+              <a
+                href={DEM_DOWNLOAD_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ fontSize: "0.73rem", color: "#0284c7" }}
+              >
+                Open DEM Portal ↗
+              </a>
+            </div>
+            <span className="panel-card-subtitle">
+              Set up your destination folder for DEM GeoTIFF (<code>.tif</code>)
+              elevation data before running <code>build-epanet</code>:
+            </span>
+            <div className="panel-input-row">
+              <input
+                type="text"
+                className="panel-text-input"
+                placeholder="Enter DEM folder path (e.g. D:\AI\agent\epanet-auto\DEM)"
+                value={demFolder}
+                onChange={(e) => setDemFolder(e.target.value)}
+              />
+              <button
+                type="button"
+                className="layer-upload-btn"
+                onClick={() => demFileInputRef.current?.click()}
+                title="Select local .tif DEM files"
+              >
+                + .tif
+              </button>
+              <input
+                ref={demFileInputRef}
+                type="file"
+                accept=".tif,.tiff"
+                multiple
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  if (e.target.files) {
+                    const names = Array.from(e.target.files).map((f) => f.name);
+                    setDemTileNames(names);
+                    e.target.value = "";
+                  }
+                }}
+              />
+            </div>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: "0.72rem",
+                color: demFolder.trim() ? "#059669" : "#dc2626",
+              }}
+            >
+              <span>
+                {demFolder.trim()
+                  ? `✓ Folder: ${demFolder.trim()}${
+                      demTileNames.length > 0
+                        ? ` (${demTileNames.length} .tif files)`
+                        : ""
+                    }`
+                  : "⚠ Please configure a DEM destination folder"}
+              </span>
+              <button
+                type="button"
+                className="layer-upload-btn"
+                onClick={handleDemDownloadClick}
+              >
+                Download DEM ↗
+              </button>
             </div>
           </div>
 
