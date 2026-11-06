@@ -277,7 +277,80 @@ function FormattedMarkdown({
   );
 }
 
+function isPdfAttachment(att: { name: string; mimeType: string }): boolean {
+  return (
+    att.mimeType === "application/pdf" || /\.pdf$/i.test(att.name || "")
+  );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function extractPdfInfoFromBuffer(buffer: ArrayBuffer): {
+  pageCount: number;
+  extractedText: string;
+} {
+  try {
+    const decoder = new TextDecoder("latin1");
+    const raw = decoder.decode(buffer);
+    const pageMatches = raw.match(/\/Type\s*\/Page\b/g);
+    const pageCount = Math.max(1, pageMatches ? pageMatches.length : 1);
+
+    // Extract readable text strings enclosed in PDF text objects (...)
+    const textChunks: string[] = [];
+    const regex = /\(([^()\\]{3,200})\)/g;
+    let match: RegExpExecArray | null = null;
+    while ((match = regex.exec(raw)) !== null && textChunks.length < 160) {
+      const candidate = match[1].replace(/\s+/g, " ").trim();
+      if (/^[a-zA-Z0-9.,;:'"?!\-+/$%&()[\]\s]{4,}$/.test(candidate)) {
+        textChunks.push(candidate);
+      }
+    }
+    const extractedText = textChunks.join(" ").slice(0, 3500);
+    return { pageCount, extractedText };
+  } catch {
+    return { pageCount: 1, extractedText: "" };
+  }
+}
+
 function readImageFile(file: File): Promise<ChatImageAttachment> {
+  const isPdf =
+    file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+
+  if (isPdf) {
+    return new Promise((resolve, reject) => {
+      const dataUrlReader = new FileReader();
+      dataUrlReader.onerror = () =>
+        reject(new Error(`Failed to read ${file.name}`));
+      dataUrlReader.onload = async () => {
+        const dataUrl = String(dataUrlReader.result || "");
+        let pageCount = 1;
+        let extractedText = "";
+        try {
+          const buf = await file.arrayBuffer();
+          const info = extractPdfInfoFromBuffer(buf);
+          pageCount = info.pageCount;
+          extractedText = info.extractedText;
+        } catch {
+          // Ignore binary parse errors
+        }
+        resolve({
+          id: `pdf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          name: file.name,
+          mimeType: "application/pdf",
+          sizeBytes: file.size,
+          dataUrl,
+          pageCount,
+          extractedText,
+        });
+      };
+      dataUrlReader.readAsDataURL(file);
+    });
+  }
+
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
@@ -394,6 +467,7 @@ function App({ user, signOut }: AppProps) {
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const picInputRef = useRef<HTMLInputElement | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const folderJsonInputRef = useRef<HTMLInputElement | null>(null);
   const demFileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -503,7 +577,8 @@ function App({ user, signOut }: AppProps) {
     const files = Array.from(fileList).filter(
       (f) =>
         f.type.startsWith("image/") ||
-        /\.(png|jpe?g|webp|gif|svg|bmp)$/i.test(f.name)
+        f.type === "application/pdf" ||
+        /\.(png|jpe?g|webp|gif|svg|bmp|pdf)$/i.test(f.name)
     );
     if (files.length === 0) return;
 
@@ -1004,7 +1079,7 @@ function App({ user, signOut }: AppProps) {
     const baseMessages = existingHistory ?? activeThread.messages;
     const displayPrompt =
       trimmed ||
-      `Attached ${attachedImages.length} picture file${
+      `Attached ${attachedImages.length} file${
         attachedImages.length > 1 ? "s" : ""
       }: ${attachedImages.map((img) => img.name).join(", ")}`;
 
@@ -1199,9 +1274,12 @@ function App({ user, signOut }: AppProps) {
       >
         {isDraggingPic && (
           <div className="pic-drop-overlay">
-            <span>🖼️ Drop picture file here to attach to GPT-6 Sol conversation</span>
+            <span>
+              🖼️ / 📄 Drop picture or PDF file here to attach to GPT-6 Sol
+              conversation
+            </span>
             <span style={{ fontSize: "0.82rem", color: "#047857" }}>
-              Supports PNG, JPG, WEBP, GIF, SVG, BMP
+              Supports PDF, PNG, JPG, WEBP, GIF, SVG, BMP
             </span>
           </div>
         )}
@@ -1301,14 +1379,46 @@ function App({ user, signOut }: AppProps) {
                     <div className="user-bubble">
                       {msg.attachments && msg.attachments.length > 0 && (
                         <div className="user-attachments-grid">
-                          {msg.attachments.map((att) => (
-                            <div key={att.id} className="user-attachment-card">
-                              <img src={att.dataUrl} alt={att.name} />
-                              <span className="user-attachment-caption">
-                                {att.name}
-                              </span>
-                            </div>
-                          ))}
+                          {msg.attachments.map((att) =>
+                            isPdfAttachment(att) ? (
+                              <div
+                                key={att.id}
+                                className="user-attachment-card pdf-card"
+                              >
+                                <div className="user-pdf-header">
+                                  <span className="user-pdf-icon">📄 PDF</span>
+                                  <span className="user-pdf-meta">
+                                    {formatFileSize(att.sizeBytes)}
+                                    {att.pageCount
+                                      ? ` · ${att.pageCount} pg`
+                                      : ""}
+                                  </span>
+                                </div>
+                                <span
+                                  className="user-attachment-caption"
+                                  title={att.name}
+                                >
+                                  {att.name}
+                                </span>
+                                {att.dataUrl && (
+                                  <a
+                                    href={att.dataUrl}
+                                    download={att.name}
+                                    className="user-pdf-download-link"
+                                  >
+                                    ⬇ Download PDF
+                                  </a>
+                                )}
+                              </div>
+                            ) : (
+                              <div key={att.id} className="user-attachment-card">
+                                <img src={att.dataUrl} alt={att.name} />
+                                <span className="user-attachment-caption">
+                                  {att.name}
+                                </span>
+                              </div>
+                            )
+                          )}
                         </div>
                       )}
                       <div>{msg.content}</div>
@@ -1372,7 +1482,20 @@ function App({ user, signOut }: AppProps) {
             <input
               ref={picInputRef}
               type="file"
-              accept="image/*"
+              accept="image/*,.pdf,application/pdf"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files) {
+                  handleAddPictureFiles(e.target.files);
+                  e.target.value = "";
+                }
+              }}
+            />
+            <input
+              ref={pdfInputRef}
+              type="file"
+              accept=".pdf,application/pdf"
               multiple
               style={{ display: "none" }}
               onChange={(e) => {
@@ -1385,24 +1508,51 @@ function App({ user, signOut }: AppProps) {
 
             {pendingImages.length > 0 && (
               <div className="composer-attachments">
-                {pendingImages.map((img) => (
-                  <div key={img.id} className="composer-thumb">
-                    <img src={img.dataUrl} alt={img.name} />
-                    <span className="composer-thumb-name">{img.name}</span>
-                    <button
-                      type="button"
-                      className="composer-thumb-remove"
-                      title="Remove image"
-                      onClick={() =>
-                        setPendingImages((prev) =>
-                          prev.filter((item) => item.id !== img.id)
-                        )
-                      }
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
+                {pendingImages.map((img) =>
+                  isPdfAttachment(img) ? (
+                    <div key={img.id} className="composer-thumb pdf-thumb">
+                      <div className="composer-pdf-badge">📄 PDF</div>
+                      <div className="composer-pdf-info">
+                        <span className="composer-thumb-name" title={img.name}>
+                          {img.name}
+                        </span>
+                        <span className="composer-pdf-size">
+                          {formatFileSize(img.sizeBytes)}
+                          {img.pageCount ? ` · ${img.pageCount} pg` : ""}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="composer-thumb-remove"
+                        title="Remove PDF"
+                        onClick={() =>
+                          setPendingImages((prev) =>
+                            prev.filter((item) => item.id !== img.id)
+                          )
+                        }
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <div key={img.id} className="composer-thumb">
+                      <img src={img.dataUrl} alt={img.name} />
+                      <span className="composer-thumb-name">{img.name}</span>
+                      <button
+                        type="button"
+                        className="composer-thumb-remove"
+                        title="Remove image"
+                        onClick={() =>
+                          setPendingImages((prev) =>
+                            prev.filter((item) => item.id !== img.id)
+                          )
+                        }
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )
+                )}
               </div>
             )}
 
@@ -1410,13 +1560,20 @@ function App({ user, signOut }: AppProps) {
               ref={textareaRef}
               rows={2}
               className="composer-textarea"
-              placeholder="Message GPT-6 Sol (openai.gpt-6-sol) or drop a picture file here..."
+              placeholder="Message GPT-6 Sol (openai.gpt-6-sol) or drop a picture / PDF file here..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
             />
             <div className="composer-actions">
-              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  flexWrap: "wrap",
+                }}
+              >
                 <button
                   type="button"
                   className="attach-pic-btn"
@@ -1425,9 +1582,17 @@ function App({ user, signOut }: AppProps) {
                 >
                   🖼️ Drop / Attach Pic
                 </button>
+                <button
+                  type="button"
+                  className="attach-pic-btn attach-pdf-btn"
+                  onClick={() => pdfInputRef.current?.click()}
+                  title="Upload or drop a PDF document"
+                >
+                  📄 Upload PDF
+                </button>
                 <span className="composer-hint">
-                  Drag &amp; drop pics anywhere in chat · <strong>Enter</strong> to
-                  send
+                  Drag &amp; drop pics or PDFs anywhere in chat ·{" "}
+                  <strong>Enter</strong> to send
                 </span>
               </div>
               {isStreaming ? (

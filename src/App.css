@@ -705,6 +705,36 @@
   white-space: nowrap;
 }
 
+.composer-thumb.pdf-thumb {
+  background-color: #fff1f2;
+  border-color: #fecdd3;
+}
+
+.composer-pdf-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background-color: #ffe4e6;
+  color: #be123c;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.composer-pdf-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.composer-pdf-size {
+  font-size: 0.66rem;
+  color: #9f1239;
+}
+
 .composer-thumb-remove {
   background: #ef4444;
   color: #ffffff;
@@ -735,6 +765,50 @@
   border-radius: 10px;
   padding: 6px;
   max-width: 220px;
+}
+
+.user-attachment-card.pdf-card {
+  background-color: #fff1f2;
+  border-color: #fecdd3;
+  padding: 8px 10px;
+  min-width: 165px;
+}
+
+.user-pdf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.user-pdf-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background-color: #ffe4e6;
+  color: #be123c;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.user-pdf-meta {
+  font-size: 0.68rem;
+  color: #9f1239;
+  font-weight: 600;
+}
+
+.user-pdf-download-link {
+  font-size: 0.7rem;
+  color: #0284c7;
+  text-decoration: none;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.user-pdf-download-link:hover {
+  text-decoration: underline;
 }
 
 .user-attachment-card img {
@@ -770,6 +844,12 @@
   background-color: #e0f2fe;
   border-color: #0284c7;
   color: #0369a1;
+}
+
+.attach-pdf-btn:hover {
+  background-color: #ffe4e6;
+  border-color: #e11d48;
+  color: #be123c;
 }
 
 /* Right-hand Water System & build-epanet Panel */

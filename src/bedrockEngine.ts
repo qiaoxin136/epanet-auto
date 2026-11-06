@@ -36,6 +36,8 @@ export interface ChatImageAttachment {
   dataUrl: string;
   width?: number;
   height?: number;
+  pageCount?: number;
+  extractedText?: string;
 }
 
 export interface ChatMessage {

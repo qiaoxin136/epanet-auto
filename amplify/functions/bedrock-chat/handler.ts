@@ -13,6 +13,8 @@ interface ChatImageAttachment {
   dataUrl?: string;
   width?: number;
   height?: number;
+  pageCount?: number;
+  extractedText?: string;
 }
 
 interface ChatTurn {
@@ -51,6 +53,13 @@ type BedrockContentBlock =
         format: "png" | "jpeg" | "gif" | "webp";
         source: { bytes: string };
       };
+    }
+  | {
+      document: {
+        format: "pdf";
+        name: string;
+        source: { bytes: string };
+      };
     };
 
 function parseDataUrlImage(
@@ -68,6 +77,26 @@ function parseDataUrlImage(
   else if (rawFormat === "webp") format = "webp";
   if (!format) return null;
   return { format, bytes: base64Bytes };
+}
+
+function parseDataUrlPdf(
+  att: ChatImageAttachment
+): { name: string; bytes: string } | null {
+  if (!att.dataUrl) return null;
+  const isPdf =
+    att.mimeType === "application/pdf" || /\.pdf$/i.test(att.name || "");
+  if (!isPdf) return null;
+  const match = att.dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+  if (!match) return null;
+  // Bedrock Converse document.name allows alphanumeric, whitespace, hyphens, parentheses, and square brackets (no periods)
+  const sanitizedName =
+    (att.name || "document")
+      .replace(/\.pdf$/i, "")
+      .replace(/[^a-zA-Z0-9\s\-()[\]]/g, "-")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120) || "pdf-document";
+  return { name: sanitizedName, bytes: match[1] };
 }
 
 function normalizeMessagesForBedrock(
@@ -89,23 +118,43 @@ function normalizeMessagesForBedrock(
 
     if (role === "user" && m.attachments && m.attachments.length > 0) {
       for (const att of m.attachments) {
-        const parsedImg = includeImageBytes ? parseDataUrlImage(att) : null;
-        if (parsedImg) {
-          blocks.push({
-            image: {
-              format: parsedImg.format,
-              source: { bytes: parsedImg.bytes },
-            },
-          });
+        if (includeImageBytes) {
+          const parsedImg = parseDataUrlImage(att);
+          if (parsedImg) {
+            blocks.push({
+              image: {
+                format: parsedImg.format,
+                source: { bytes: parsedImg.bytes },
+              },
+            });
+            continue;
+          }
+          const parsedPdf = parseDataUrlPdf(att);
+          if (parsedPdf) {
+            blocks.push({
+              document: {
+                format: "pdf",
+                name: parsedPdf.name,
+                source: { bytes: parsedPdf.bytes },
+              },
+            });
+          }
         }
       }
     }
 
     const attachmentNote =
       m.attachments && m.attachments.length > 0
-        ? `\n[Attached image(s): ${m.attachments
-            .map((a) => `${a.name} (${a.mimeType})`)
-            .join(", ")}]`
+        ? `\n[Attached file(s): ${m.attachments
+            .map((a) => {
+              const baseInfo = `${a.name} (${a.mimeType}${
+                a.pageCount ? `, ${a.pageCount} page(s)` : ""
+              })`;
+              return a.extractedText
+                ? `${baseInfo}\nExtracted PDF Text Excerpt:\n${a.extractedText}`
+                : baseInfo;
+            })
+            .join("\n")}]`
         : "";
     const text = `${(m.content || "").trim()}${
       includeImageBytes ? "" : attachmentNote
@@ -114,7 +163,7 @@ function normalizeMessagesForBedrock(
     if (text && text !== "...") {
       blocks.push({ text });
     } else if (blocks.length > 0) {
-      blocks.push({ text: "Please analyze the attached image(s)." });
+      blocks.push({ text: "Please analyze the attached file(s)." });
     }
 
     if (blocks.length === 0) continue;
