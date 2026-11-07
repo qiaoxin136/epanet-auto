@@ -292,7 +292,7 @@ function buildSystemPromptWithInp(
 ): string {
   const base = (
     baseSystemPrompt ||
-    "You are Claude Opus 5 (anthropic.claude-opus-5) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
+    "You are Claude Opus 5.5 (anthropic.claude-opus-5-5) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
   ).trim();
 
   if (!inpContent || !inpContent.trim()) {
@@ -363,9 +363,9 @@ function extractUpdatedInpFromReply(
 
 export const handler = async (event: AskGpt6SolEvent) => {
   const startedAt = Date.now();
-  const engineId = process.env.BEDROCK_ENGINE_ID || "anthropic.claude-opus-5";
+  const engineId = process.env.BEDROCK_ENGINE_ID || "anthropic.claude-opus-5-5";
   const profileId =
-    process.env.BEDROCK_INFERENCE_PROFILE_ID || "us.anthropic.claude-opus-5";
+    process.env.BEDROCK_INFERENCE_PROFILE_ID || "us.anthropic.claude-opus-5-5";
   const region =
     process.env.BEDROCK_REGION || process.env.AWS_REGION || "us-east-2";
 
@@ -388,13 +388,13 @@ export const handler = async (event: AskGpt6SolEvent) => {
     (m) => m.attachments && m.attachments.length > 0
   );
 
-  // Live AWS Bedrock: try Claude Opus 5 first (supports both TEXT and IMAGE), then multimodal/text fallbacks
+  // Live AWS Bedrock: try Claude Opus 5.5 first (supports both TEXT and IMAGE), then multimodal/text fallbacks
   const candidateAttempts: Array<{ model: string; withImages: boolean }> =
     hasImages
       ? [
           { model: profileId, withImages: true },
-          { model: "global.anthropic.claude-opus-5", withImages: true },
-          { model: "anthropic.claude-opus-5", withImages: true },
+          { model: "global.anthropic.claude-opus-5-5", withImages: true },
+          { model: "anthropic.claude-opus-5-5", withImages: true },
           { model: "us.meta.llama4-maverick-17b-instruct-v1:0", withImages: true },
           { model: "us.amazon.nova-pro-v1:0", withImages: true },
           { model: "us.meta.llama4-scout-17b-instruct-v1:0", withImages: true },
@@ -403,8 +403,8 @@ export const handler = async (event: AskGpt6SolEvent) => {
         ]
       : [
           { model: profileId, withImages: false },
-          { model: "global.anthropic.claude-opus-5", withImages: false },
-          { model: "anthropic.claude-opus-5", withImages: false },
+          { model: "global.anthropic.claude-opus-5-5", withImages: false },
+          { model: "anthropic.claude-opus-5-5", withImages: false },
           { model: "openai.gpt-oss-120b-1:0", withImages: false },
           { model: "us.meta.llama4-maverick-17b-instruct-v1:0", withImages: false },
           { model: "us.amazon.nova-pro-v1:0", withImages: false },

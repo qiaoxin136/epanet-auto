@@ -401,7 +401,7 @@ function App({ user, signOut }: AppProps) {
   const mode: ExecutionMode = "bedrock";
   const [temperature, setTemperature] = useState<number>(0.7);
   const [systemPrompt, setSystemPrompt] = useState<string>(
-    "You are Claude Opus 5 (anthropic.claude-opus-5) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
+    "You are Claude Opus 5.5 (anthropic.claude-opus-5-5) paired with the build-epanet hydraulic modeling agent on AWS Bedrock."
   );
   const [showSettings, setShowSettings] = useState<boolean>(false);
   const [copiedSnippet, setCopiedSnippet] = useState<string | null>(null);
@@ -1080,7 +1080,7 @@ function App({ user, signOut }: AppProps) {
           `- **Junctions:** \`${parsedResult.stats.junctions}\` · **Pipes:** \`${parsedResult.stats.pipes}\` (\`OPEN\`: ${parsedResult.stats.openPipes}, \`CLOSED\`: ${parsedResult.stats.closedBoundaryPipes})`,
           `- **Tanks:** \`${parsedResult.stats.tanks}\` · **Pumps:** \`${parsedResult.stats.pumps}\` · **Total Demand:** \`${parsedResult.stats.totalDemandGpm} GPM\``,
           "",
-          `\`${cleanFileName}\` is now stored in the AWS Amplify backend and connected to **Claude Opus 5 (\`anthropic.claude-opus-5\`)**. You can ask the AI in this chat to inspect or modify any section of the \`.inp\` file.`,
+          `\`${cleanFileName}\` is now stored in the AWS Amplify backend and connected to **Claude Opus 5.5 (\`anthropic.claude-opus-5-5\`)**. You can ask the AI in this chat to inspect or modify any section of the \`.inp\` file.`,
         ].join("\n")
       );
     } catch (err) {
@@ -1366,7 +1366,7 @@ function App({ user, signOut }: AppProps) {
         {isDraggingPic && (
           <div className="pic-drop-overlay">
             <span>
-              🖼️ / 📄 Drop picture or PDF file here to attach to Claude Opus 5
+              🖼️ / 📄 Drop picture or PDF file here to attach to Claude Opus 5.5
               conversation
             </span>
             <span style={{ fontSize: "0.82rem", color: "#047857" }}>
@@ -1456,8 +1456,8 @@ function App({ user, signOut }: AppProps) {
               <div className="welcome-logo">C5</div>
               <h1 className="welcome-title">What can I help with?</h1>
               <p className="welcome-subtitle">
-                Conversational AI powered by <strong>Anthropic Claude Opus 5</strong> (
-                <code>anthropic.claude-opus-5</code>) + <strong>build-epanet</strong> agent.
+                Conversational AI powered by <strong>Anthropic Claude Opus 5.5</strong> (
+                <code>anthropic.claude-opus-5-5</code>) + <strong>build-epanet</strong> agent.
                 Drop any picture file here or configure your water system JSON layers
                 on the right panel.
               </p>
@@ -1698,7 +1698,7 @@ function App({ user, signOut }: AppProps) {
               ref={textareaRef}
               rows={2}
               className="composer-textarea"
-              placeholder="Message Claude Opus 5 (anthropic.claude-opus-5) or drop a picture / PDF file here..."
+              placeholder="Message Claude Opus 5.5 (anthropic.claude-opus-5-5) or drop a picture / PDF file here..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -1756,8 +1756,8 @@ function App({ user, signOut }: AppProps) {
             </div>
           </div>
           <div className="composer-footer-note">
-            AWS Bedrock Engine: <code>anthropic.claude-opus-5</code> (Profile:{" "}
-            <code>us.anthropic.claude-opus-5</code>) · Agent: <code>build-epanet</code>
+            AWS Bedrock Engine: <code>anthropic.claude-opus-5-5</code> (Profile:{" "}
+            <code>us.anthropic.claude-opus-5-5</code>) · Agent: <code>build-epanet</code>
           </div>
         </footer>
       </main>

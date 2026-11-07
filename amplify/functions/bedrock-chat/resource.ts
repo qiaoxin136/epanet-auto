@@ -6,8 +6,8 @@ export const bedrockChat = defineFunction({
   timeoutSeconds: 60,
   memoryMB: 512,
   environment: {
-    BEDROCK_ENGINE_ID: "anthropic.claude-opus-5",
-    BEDROCK_INFERENCE_PROFILE_ID: "us.anthropic.claude-opus-5",
+    BEDROCK_ENGINE_ID: "anthropic.claude-opus-5-5",
+    BEDROCK_INFERENCE_PROFILE_ID: "us.anthropic.claude-opus-5-5",
     BEDROCK_REGION: "us-east-2",
   },
 });
