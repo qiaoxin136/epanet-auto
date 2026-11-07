@@ -1,4 +1,5 @@
 import { generateClient } from "aws-amplify/data";
+import { downloadData, list, uploadData } from "aws-amplify/storage";
 import outputs from "../amplify_outputs.json";
 import { extractPdfContent } from "./pdfExtractor";
 
@@ -25,12 +26,17 @@ interface AskGpt6SolClient {
       systemPrompt?: string;
       temperature?: number;
       mode?: string;
+      inpContent?: string;
+      inpFileName?: string;
     }) => Promise<AskGpt6SolGraphqlResponse>;
   };
   models?: {
     Todo?: {
       get: (args: { id: string }) => Promise<{
-        data?: { id: string; content?: string | null } | null;
+        data?: { id: string; content?: string | null; updatedAt?: string } | null;
+      }>;
+      list: (args?: { limit?: number }) => Promise<{
+        data?: Array<{ id: string; content?: string | null; updatedAt?: string }> | null;
       }>;
       create: (args: { id: string; content: string }) => Promise<{
         data?: { id: string; content?: string | null } | null;
@@ -293,40 +299,276 @@ async function prepareMessagesWithPdfExtraction(
 }
 
 const AMPLIFY_ACTIVE_INP_RECORD_ID = "epanet-active-inp-v1";
+const AMPLIFY_INP_FILE_PREFIX = "epanet-inp-file::";
+const LOCAL_STORAGE_INP_CACHE_KEY = "epanet-amplify-storage-inp-files-v1";
+
+export interface AmplifyStoredInpFile {
+  id: string;
+  fileName: string;
+  storagePath: string;
+  sizeBytes: number;
+  updatedAt: string;
+  source: string;
+  inpContent?: string;
+}
+
+export function isAmplifyStorageBucketConfigured(): boolean {
+  const bucket = (outputs as { storage?: { bucket_name?: string } })?.storage
+    ?.bucket_name;
+  return Boolean(bucket && bucket.trim().length > 0);
+}
+
+function normalizeInpFileName(fileName: string): string {
+  const trimmed = (fileName || "water_distribution_model.inp").trim();
+  return trimmed.toLowerCase().endsWith(".inp")
+    ? trimmed
+    : `${trimmed.replace(/\.[^.]+$/, "")}.inp`;
+}
+
+function readLocalInpStorageCache(): AmplifyStoredInpFile[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(LOCAL_STORAGE_INP_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as AmplifyStoredInpFile[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function upsertLocalInpStorageCache(entry: AmplifyStoredInpFile): void {
+  if (typeof window === "undefined") return;
+  try {
+    const current = readLocalInpStorageCache().filter(
+      (item) => item.fileName.toLowerCase() !== entry.fileName.toLowerCase()
+    );
+    const next = [entry, ...current].slice(0, 25);
+    window.localStorage.setItem(LOCAL_STORAGE_INP_CACHE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota issues
+  }
+}
 
 export async function syncInpToAmplifyBackend(
   fileName: string,
-  inpContent: string
+  inpContent: string,
+  sourceLabel: string = "Water System Studio"
 ): Promise<boolean> {
-  if (!isAmplifyBackendConfigured() || !inpContent.trim()) return false;
-  try {
-    const client = generateClient() as unknown as AskGpt6SolClient;
-    const todoModel = client.models?.Todo;
-    if (!todoModel) return false;
+  if (!inpContent.trim()) return false;
+  const cleanFileName = normalizeInpFileName(fileName);
+  const nowIso = new Date().toISOString();
+  const recordId = `${AMPLIFY_INP_FILE_PREFIX}${cleanFileName}`;
+  const storagePath = `inp-files/${cleanFileName}`;
 
-    const payload = JSON.stringify({
-      type: "EPANET_INP",
-      fileName,
-      inpContent,
-      updatedAt: new Date().toISOString(),
-    });
+  upsertLocalInpStorageCache({
+    id: recordId,
+    fileName: cleanFileName,
+    storagePath,
+    sizeBytes: inpContent.length,
+    updatedAt: nowIso,
+    source: sourceLabel,
+    inpContent,
+  });
 
-    const existing = await todoModel.get({ id: AMPLIFY_ACTIVE_INP_RECORD_ID });
-    if (existing?.data?.id) {
-      await todoModel.update({
-        id: AMPLIFY_ACTIVE_INP_RECORD_ID,
-        content: payload,
-      });
-    } else {
-      await todoModel.create({
-        id: AMPLIFY_ACTIVE_INP_RECORD_ID,
-        content: payload,
-      });
+  let syncedCloud = false;
+
+  if (isAmplifyStorageBucketConfigured()) {
+    try {
+      await uploadData({
+        path: storagePath,
+        data: inpContent,
+        options: {
+          contentType: "text/plain;charset=utf-8",
+        },
+      }).result;
+      syncedCloud = true;
+    } catch {
+      // Fallback to Amplify Data below
     }
-    return true;
-  } catch {
-    return false;
   }
+
+  if (isAmplifyBackendConfigured()) {
+    try {
+      const client = generateClient() as unknown as AskGpt6SolClient;
+      const todoModel = client.models?.Todo;
+      if (todoModel) {
+        const payload = JSON.stringify({
+          type: "EPANET_INP",
+          fileName: cleanFileName,
+          storagePath,
+          sizeBytes: inpContent.length,
+          source: sourceLabel,
+          inpContent,
+          updatedAt: nowIso,
+        });
+
+        const existingActive = await todoModel.get({
+          id: AMPLIFY_ACTIVE_INP_RECORD_ID,
+        });
+        if (existingActive?.data?.id) {
+          await todoModel.update({
+            id: AMPLIFY_ACTIVE_INP_RECORD_ID,
+            content: payload,
+          });
+        } else {
+          await todoModel.create({
+            id: AMPLIFY_ACTIVE_INP_RECORD_ID,
+            content: payload,
+          });
+        }
+
+        const existingNamed = await todoModel.get({ id: recordId });
+        if (existingNamed?.data?.id) {
+          await todoModel.update({
+            id: recordId,
+            content: payload,
+          });
+        } else {
+          await todoModel.create({
+            id: recordId,
+            content: payload,
+          });
+        }
+        syncedCloud = true;
+      }
+    } catch {
+      // Keep local cache entry
+    }
+  }
+
+  return syncedCloud;
+}
+
+export async function listInpFilesInAmplifyStorage(): Promise<
+  AmplifyStoredInpFile[]
+> {
+  const byName = new Map<string, AmplifyStoredInpFile>();
+
+  for (const cached of readLocalInpStorageCache()) {
+    byName.set(cached.fileName.toLowerCase(), cached);
+  }
+
+  if (isAmplifyBackendConfigured()) {
+    try {
+      const client = generateClient() as unknown as AskGpt6SolClient;
+      const todoModel = client.models?.Todo;
+      if (todoModel?.list) {
+        const res = await todoModel.list({ limit: 100 });
+        for (const item of res?.data || []) {
+          if (!item?.content) continue;
+          try {
+            const parsed = JSON.parse(item.content) as {
+              type?: string;
+              fileName?: string;
+              storagePath?: string;
+              sizeBytes?: number;
+              source?: string;
+              inpContent?: string;
+              updatedAt?: string;
+            };
+            if (parsed.type === "EPANET_INP" && parsed.inpContent) {
+              const cleanName = normalizeInpFileName(
+                parsed.fileName || "water_distribution_model.inp"
+              );
+              const key = cleanName.toLowerCase();
+              const updatedAt =
+                parsed.updatedAt || item.updatedAt || new Date().toISOString();
+              const prev = byName.get(key);
+              if (!prev || updatedAt >= prev.updatedAt) {
+                const entry: AmplifyStoredInpFile = {
+                  id: item.id || `${AMPLIFY_INP_FILE_PREFIX}${cleanName}`,
+                  fileName: cleanName,
+                  storagePath: parsed.storagePath || `inp-files/${cleanName}`,
+                  sizeBytes: parsed.sizeBytes ?? parsed.inpContent.length,
+                  updatedAt,
+                  source: parsed.source || "AWS Amplify Cloud",
+                  inpContent: parsed.inpContent,
+                };
+                byName.set(key, entry);
+                upsertLocalInpStorageCache(entry);
+              }
+            }
+          } catch {
+            // Skip non-JSON Todo entries
+          }
+        }
+      }
+    } catch {
+      // Ignore network errors and use remaining sources
+    }
+  }
+
+  if (isAmplifyStorageBucketConfigured()) {
+    try {
+      const s3List = await list({ path: "inp-files/" });
+      for (const s3Item of s3List.items || []) {
+        const rawName = s3Item.path.replace(/^inp-files\//, "").trim();
+        if (!rawName || !rawName.toLowerCase().endsWith(".inp")) continue;
+        const key = rawName.toLowerCase();
+        const existing = byName.get(key);
+        const s3Updated = s3Item.lastModified
+          ? s3Item.lastModified.toISOString()
+          : existing?.updatedAt || new Date().toISOString();
+        byName.set(key, {
+          id: existing?.id || `${AMPLIFY_INP_FILE_PREFIX}${rawName}`,
+          fileName: rawName,
+          storagePath: s3Item.path,
+          sizeBytes: s3Item.size ?? existing?.sizeBytes ?? 0,
+          updatedAt: s3Updated,
+          source: "AWS Amplify S3 Storage",
+          inpContent: existing?.inpContent,
+        });
+      }
+    } catch {
+      // Fallback to Data + Local cache
+    }
+  }
+
+  return Array.from(byName.values()).sort((a, b) =>
+    b.updatedAt.localeCompare(a.updatedAt)
+  );
+}
+
+export async function fetchInpFileContentFromAmplifyStorage(
+  item: AmplifyStoredInpFile
+): Promise<string | null> {
+  if (item.inpContent && item.inpContent.trim()) {
+    return item.inpContent;
+  }
+
+  if (isAmplifyStorageBucketConfigured() && item.storagePath) {
+    try {
+      const downloadResult = await downloadData({
+        path: item.storagePath,
+      }).result;
+      const text = await downloadResult.body.text();
+      if (text.trim()) {
+        return text;
+      }
+    } catch {
+      // Fallback to Amplify Data
+    }
+  }
+
+  if (isAmplifyBackendConfigured()) {
+    try {
+      const client = generateClient() as unknown as AskGpt6SolClient;
+      const todoModel = client.models?.Todo;
+      if (todoModel) {
+        const res = await todoModel.get({ id: item.id });
+        const raw = res?.data?.content;
+        if (raw) {
+          const parsed = JSON.parse(raw) as { inpContent?: string };
+          if (parsed.inpContent) return parsed.inpContent;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  return null;
 }
 
 export async function loadInpFromAmplifyBackend(): Promise<{
@@ -334,7 +576,17 @@ export async function loadInpFromAmplifyBackend(): Promise<{
   inpContent: string;
   updatedAt?: string;
 } | null> {
-  if (!isAmplifyBackendConfigured()) return null;
+  if (!isAmplifyBackendConfigured()) {
+    const cached = readLocalInpStorageCache()[0];
+    if (cached?.inpContent) {
+      return {
+        fileName: cached.fileName,
+        inpContent: cached.inpContent,
+        updatedAt: cached.updatedAt,
+      };
+    }
+    return null;
+  }
   try {
     const client = generateClient() as unknown as AskGpt6SolClient;
     const todoModel = client.models?.Todo;
@@ -512,6 +764,8 @@ export async function queryBedrockGpt6Sol(
         systemPrompt: effectiveSystemPrompt,
         temperature,
         mode: "bedrock",
+        inpContent: activeInpContent,
+        inpFileName: activeInpFileName,
       });
 
       if (response.errors?.length) {
@@ -550,7 +804,11 @@ export async function queryBedrockGpt6Sol(
         );
 
       if (updatedInpContent && updatedInpFileName) {
-        void syncInpToAmplifyBackend(updatedInpFileName, updatedInpContent);
+        void syncInpToAmplifyBackend(
+          updatedInpFileName,
+          updatedInpContent,
+          "Modified by Bedrock AI"
+        );
       }
 
       const finalText = await streamTextToCallback(cleanedReply, onToken, signal);

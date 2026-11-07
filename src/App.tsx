@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import {
+  AmplifyStoredInpFile,
   BEDROCK_ENGINE_CONFIG,
   ChatImageAttachment,
   ChatMessage,
   ConversationThread,
   ExecutionMode,
+  fetchInpFileContentFromAmplifyStorage,
+  listInpFilesInAmplifyStorage,
   loadInpFromAmplifyBackend,
   queryBedrockGpt6Sol,
   syncInpToAmplifyBackend,
@@ -429,6 +432,14 @@ function App({ user, signOut }: AppProps) {
   const [inpUploadedToBackendAt, setInpUploadedToBackendAt] = useState<
     string | null
   >(null);
+  const [amplifyStoredInpFiles, setAmplifyStoredInpFiles] = useState<
+    AmplifyStoredInpFile[]
+  >([]);
+  const [isLoadingStoredInpFiles, setIsLoadingStoredInpFiles] =
+    useState<boolean>(false);
+  const [downloadingStoredFileName, setDownloadingStoredFileName] = useState<
+    string | null
+  >(null);
   const [isBuildingModel, setIsBuildingModel] = useState<boolean>(false);
   const [buildProgressPercent, setBuildProgressPercent] = useState<number>(0);
   const [buildStageText, setBuildStageText] = useState<string>(
@@ -498,18 +509,34 @@ function App({ user, signOut }: AppProps) {
     bottomAnchorRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeThread?.messages]);
 
-  // Load any active .inp file stored in the AWS Amplify backend on startup
+  async function refreshAmplifyStoredInpFiles() {
+    setIsLoadingStoredInpFiles(true);
+    try {
+      const files = await listInpFilesInAmplifyStorage();
+      setAmplifyStoredInpFiles(files);
+    } finally {
+      setIsLoadingStoredInpFiles(false);
+    }
+  }
+
+  // Load any active .inp file and list all .inp files stored in the AWS Amplify backend on startup
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const stored = await loadInpFromAmplifyBackend();
-      if (!cancelled && stored && stored.inpContent) {
+      const [stored, allFiles] = await Promise.all([
+        loadInpFromAmplifyBackend(),
+        listInpFilesInAmplifyStorage(),
+      ]);
+      if (cancelled) return;
+      setAmplifyStoredInpFiles(allFiles);
+      const initialInp = stored && stored.inpContent ? stored : allFiles[0];
+      if (initialInp && initialInp.inpContent) {
         setBuildResult((prev) =>
           prev ??
           recalculateBuildResultFromInp(
-            stored.inpContent,
+            initialInp.inpContent!,
             null,
-            stored.fileName,
+            initialInp.fileName,
             targetCrs
           )
         );
@@ -1011,7 +1038,14 @@ function App({ user, signOut }: AppProps) {
       );
       setBuildResult(built);
       setInpModifiedByBedrockAt(null);
-      void syncInpToAmplifyBackend(built.inpFileName, built.inpContent);
+      void (async () => {
+        await syncInpToAmplifyBackend(
+          built.inpFileName,
+          built.inpContent,
+          "Built by build-epanet"
+        );
+        await refreshAmplifyStoredInpFiles();
+      })();
 
       appendAgentConversationPair(
         `Run build-epanet agent to build ${built.inpFileName} (CRS ${targetCrs})`,
@@ -1022,19 +1056,61 @@ function App({ user, signOut }: AppProps) {
     }
   }
 
-  function handleDownloadInpFile() {
-    if (!buildResult) return;
-    const blob = new Blob([buildResult.inpContent], {
+  function triggerLocalInpDownload(fileName: string, inpContent: string) {
+    const cleanName = fileName.toLowerCase().endsWith(".inp")
+      ? fileName
+      : `${fileName.replace(/\.[^.]+$/, "")}.inp`;
+    const blob = new Blob([inpContent], {
       type: "text/plain;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = buildResult.inpFileName;
+    a.download = cleanName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  function handleDownloadInpFile() {
+    if (!buildResult) return;
+    triggerLocalInpDownload(buildResult.inpFileName, buildResult.inpContent);
+  }
+
+  async function handleDownloadStoredInpFile(item: AmplifyStoredInpFile) {
+    setDownloadingStoredFileName(item.fileName);
+    try {
+      const content =
+        (await fetchInpFileContentFromAmplifyStorage(item)) ||
+        (buildResult &&
+        buildResult.inpFileName.toLowerCase() === item.fileName.toLowerCase()
+          ? buildResult.inpContent
+          : null);
+      if (!content) {
+        setUploadError(
+          `Unable to retrieve "${item.fileName}" from AWS Amplify Storage.`
+        );
+        return;
+      }
+      triggerLocalInpDownload(item.fileName, content);
+    } finally {
+      setDownloadingStoredFileName(null);
+    }
+  }
+
+  async function handleSelectStoredInpFile(item: AmplifyStoredInpFile) {
+    const content = await fetchInpFileContentFromAmplifyStorage(item);
+    if (!content) return;
+    const parsed = recalculateBuildResultFromInp(
+      content,
+      buildResult,
+      item.fileName,
+      targetCrs
+    );
+    setModelName(item.fileName.replace(/\.inp$/i, ""));
+    setBuildResult(parsed);
+    setInpModifiedByBedrockAt(null);
   }
 
   async function handleUploadInpFile(file: File) {
@@ -1059,7 +1135,12 @@ function App({ user, signOut }: AppProps) {
       setBuildResult(parsedResult);
       setInpModifiedByBedrockAt(null);
 
-      const synced = await syncInpToAmplifyBackend(cleanFileName, rawText);
+      const synced = await syncInpToAmplifyBackend(
+        cleanFileName,
+        rawText,
+        "Uploaded via inp Upload"
+      );
+      await refreshAmplifyStoredInpFiles();
       const ts = new Date().toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
@@ -1147,10 +1228,14 @@ function App({ user, signOut }: AppProps) {
         waterJsonFolder
       );
       setBuildResult(currentBuild);
-      void syncInpToAmplifyBackend(
-        currentBuild.inpFileName,
-        currentBuild.inpContent
-      );
+      void (async () => {
+        await syncInpToAmplifyBackend(
+          currentBuild.inpFileName,
+          currentBuild.inpContent,
+          "Auto-Initialized"
+        );
+        await refreshAmplifyStoredInpFiles();
+      })();
     }
 
     const attachedImages = [...activeAttachments];
@@ -1249,6 +1334,7 @@ function App({ user, signOut }: AppProps) {
         );
         setBuildResult(updatedBuild);
         setInpModifiedByBedrockAt(new Date().toLocaleTimeString());
+        void refreshAmplifyStoredInpFiles();
       }
 
       setThreads((prev) =>
@@ -2204,6 +2290,117 @@ function App({ user, signOut }: AppProps) {
               <div className="inp-preview-box">{buildResult.inpContent}</div>
             </div>
           )}
+
+          {/* Step 6: AWS Amplify Storage (.inp Files) Card */}
+          <div className="panel-card">
+            <div className="panel-card-header">
+              <span className="panel-card-title">
+                ☁️ AWS Amplify Storage (.inp Files)
+              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <span className="available-data-window-count">
+                  {amplifyStoredInpFiles.length} file
+                  {amplifyStoredInpFiles.length === 1 ? "" : "s"}
+                </span>
+                <button
+                  type="button"
+                  className="layer-upload-btn"
+                  onClick={() => void refreshAmplifyStoredInpFiles()}
+                  disabled={isLoadingStoredInpFiles}
+                  title="Refresh .inp files from AWS Amplify Storage"
+                >
+                  {isLoadingStoredInpFiles ? "⏳..." : "↻ Refresh"}
+                </button>
+              </div>
+            </div>
+
+            <span className="panel-card-subtitle">
+              All EPANET <code>.inp</code> files stored in AWS Amplify Storage (
+              <code>inp-files/</code>). Click <strong>⬇ Download .inp</strong> to
+              save any model directly to your local drive.
+            </span>
+
+            <div className="available-data-window">
+              <div className="available-data-window-header">
+                <span>🗄️ Stored .inp Files in AWS Amplify</span>
+                <span className="available-data-window-count">
+                  inp-files/*
+                </span>
+              </div>
+              <div className="available-data-window-body">
+                {amplifyStoredInpFiles.length === 0 ? (
+                  <div className="available-data-empty">
+                    No <code>.inp</code> files in AWS Amplify Storage yet. Click{" "}
+                    <strong>inp Upload</strong> at the top or{" "}
+                    <strong>⚡ Run Build</strong> above to store an{" "}
+                    <code>.inp</code> model in AWS Amplify.
+                  </div>
+                ) : (
+                  amplifyStoredInpFiles.map((item) => {
+                    const isActive =
+                      buildResult?.inpFileName.toLowerCase() ===
+                      item.fileName.toLowerCase();
+                    const isDownloading =
+                      downloadingStoredFileName === item.fileName;
+                    return (
+                      <div
+                        key={item.id}
+                        className={`available-data-item ${
+                          isActive ? "selected" : ""
+                        }`}
+                        onClick={() => void handleSelectStoredInpFile(item)}
+                        title="Click to load this .inp file into the Built Model viewer"
+                      >
+                        <div className="available-data-item-top">
+                          <span className="available-data-filename">
+                            <span>📄</span>
+                            <span>{item.fileName}</span>
+                            {isActive && (
+                              <span className="available-data-type-badge">
+                                Active
+                              </span>
+                            )}
+                          </span>
+                          <button
+                            type="button"
+                            className="epanet-btn build-btn"
+                            style={{
+                              padding: "3px 9px",
+                              fontSize: "0.72rem",
+                              flexShrink: 0,
+                            }}
+                            disabled={isDownloading}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleDownloadStoredInpFile(item);
+                            }}
+                            title={`Download ${item.fileName} from AWS Amplify Storage to your local drive`}
+                          >
+                            {isDownloading
+                              ? "⏳ Saving..."
+                              : "⬇ Download .inp"}
+                          </button>
+                        </div>
+                        <div className="available-data-meta">
+                          <span>
+                            {(item.sizeBytes / 1024).toFixed(1)} KB ·{" "}
+                            {item.source}
+                          </span>
+                          <span>
+                            {new Date(item.updatedAt).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                              second: "2-digit",
+                            })}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       </aside>
     </div>
