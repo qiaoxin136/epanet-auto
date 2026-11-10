@@ -18,18 +18,27 @@ import {
   BuildEpanetResult,
   DEM_DOWNLOAD_URL,
   DemDownloadProgress,
+  DemIntersectingTile,
+  GisCoverageSummary,
+  NoaaDemDatasetOption,
   UploadedLayerInfo,
   WaterLayerKey,
   auditWaterSystem,
   buildEpanetModel,
+  computeGisCoverageForWaterSystem,
   createSampleWaterSystemLayers,
+  discoverDemOptionsForWaterSystem,
   downloadDemForWaterSystem,
+  isLikelyPipeJsonFile,
   parseWaterJsonFile,
   recalculateBuildResultFromInp,
 } from "./epanetBuilder";
 import { extractPdfContent } from "./pdfExtractor";
 
 const STORAGE_KEY = "epanet_auto_gpt6_sol_threads_v1";
+const WATER_JSON_FOLDER_STORAGE_KEY = "epanet_water_json_folder_v2";
+const DEFAULT_GASPARILLA_GIS_FOLDER =
+  "D:\\Jiang Feng\\Gasparilla Island\\gis\\raw data\\Lat-Lon";
 
 interface BuildStepItem {
   id: string;
@@ -411,15 +420,35 @@ function App({ user, signOut }: AppProps) {
 
   // Right-hand Water System & build-epanet Panel state
   const [modelName, setModelName] = useState<string>("water_distribution_model");
-  const [targetCrs, setTargetCrs] = useState<string>("EPSG:2264");
+  const [targetCrs, setTargetCrs] = useState<string>("EPSG:2882");
   const [demTileNames, setDemTileNames] = useState<string[]>([]);
   const [isDownloadingDem, setIsDownloadingDem] = useState<boolean>(false);
+  const [isSearchingDemCoverage, setIsSearchingDemCoverage] =
+    useState<boolean>(false);
+  const [gisCoverage, setGisCoverage] = useState<GisCoverageSummary | null>(
+    null
+  );
+  const [availableDemDatasets, setAvailableDemDatasets] = useState<
+    NoaaDemDatasetOption[]
+  >([]);
+  const [selectedDemMissionId, setSelectedDemMissionId] = useState<
+    string | null
+  >(null);
+  const [demIntersectingTiles, setDemIntersectingTiles] = useState<
+    DemIntersectingTile[]
+  >([]);
   const [demDownloadProgress, setDemDownloadProgress] =
     useState<DemDownloadProgress | null>(null);
   const [demDownloadError, setDemDownloadError] = useState<string | null>(null);
-  const [waterJsonFolder, setWaterJsonFolder] = useState<string>(
-    "D:\\AI\\agent\\epanet-auto\\water-json"
-  );
+  const [waterJsonFolder, setWaterJsonFolder] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(WATER_JSON_FOLDER_STORAGE_KEY);
+      if (saved && saved.trim()) return saved.trim();
+    } catch {
+      // Ignore storage error
+    }
+    return DEFAULT_GASPARILLA_GIS_FOLDER;
+  });
   const [waterLayers, setWaterLayers] = useState<
     Partial<Record<WaterLayerKey, UploadedLayerInfo>>
   >({});
@@ -449,7 +478,7 @@ function App({ user, signOut }: AppProps) {
     "Click ⚡ Build to run the 6-step build-epanet hydraulic modeling pipeline."
   );
   const [buildSteps, setBuildSteps] = useState<BuildStepItem[]>(() =>
-    createInitialBuildSteps("EPSG:2264", "water_distribution_model")
+    createInitialBuildSteps("EPSG:2882", "water_distribution_model")
   );
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [folderScanStatus, setFolderScanStatus] = useState<string | null>(null);
@@ -463,6 +492,209 @@ function App({ user, signOut }: AppProps) {
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const folderJsonInputRef = useRef<HTMLInputElement | null>(null);
   const inpFileInputRef = useRef<HTMLInputElement | null>(null);
+  const lastScannedFolderRef = useRef<string>("");
+  const demMapContainerRef = useRef<HTMLDivElement | null>(null);
+  const leafletMapRef = useRef<{
+    remove: () => void;
+    invalidateSize: () => void;
+    fitBounds: (
+      bounds: unknown,
+      options?: { padding?: [number, number] }
+    ) => void;
+  } | null>(null);
+  const leafletOverlayGroupRef = useRef<{
+    clearLayers: () => void;
+    addTo: (map: unknown) => unknown;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!gisCoverage || !demMapContainerRef.current) return;
+
+    interface LeafletLayerInstance {
+      addTo: (target: unknown) => LeafletLayerInstance;
+      bindPopup: (html: string) => LeafletLayerInstance;
+      getBounds: () => unknown;
+    }
+
+    interface LeafletStatic {
+      map: (
+        el: HTMLElement,
+        opts?: { zoomControl?: boolean }
+      ) => {
+        setView: (center: [number, number], zoom: number) => unknown;
+        remove: () => void;
+        invalidateSize: () => void;
+        fitBounds: (
+          bounds: unknown,
+          options?: { padding?: [number, number] }
+        ) => void;
+      };
+      tileLayer: (
+        url: string,
+        opts: { maxZoom: number; attribution: string }
+      ) => { addTo: (map: unknown) => unknown };
+      layerGroup: () => {
+        clearLayers: () => void;
+        addTo: (map: unknown) => {
+          clearLayers: () => void;
+          addTo: (m: unknown) => unknown;
+        };
+      };
+      geoJSON: (
+        geojson: unknown,
+        opts?: {
+          style?: Record<string, unknown>;
+          pointToLayer?: (
+            feature: unknown,
+            latlng: [number, number]
+          ) => unknown;
+        }
+      ) => LeafletLayerInstance;
+      circleMarker: (
+        latlng: [number, number],
+        opts: Record<string, unknown>
+      ) => LeafletLayerInstance;
+    }
+
+    const L = (window as unknown as { L?: LeafletStatic }).L;
+    if (!L) return;
+
+    if (!leafletMapRef.current) {
+      const [minLon, minLat, maxLon, maxLat] = gisCoverage.bbox4326;
+      const centerLat = (minLat + maxLat) / 2;
+      const centerLon = (minLon + maxLon) / 2;
+      const mapInstance = L.map(demMapContainerRef.current, {
+        zoomControl: true,
+      });
+      mapInstance.setView([centerLat, centerLon], 13);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(mapInstance);
+      leafletMapRef.current = mapInstance;
+      leafletOverlayGroupRef.current = L.layerGroup().addTo(mapInstance);
+    }
+
+    const map = leafletMapRef.current;
+    const group = leafletOverlayGroupRef.current;
+    if (!map || !group) return;
+
+    group.clearLayers();
+
+    // 1. Draw NOAA-Compatible Pipe GIS Coverage AOI Polygon (same #38bdf8 style as main.d3nvwo119rglg1.amplifyapp.com)
+    const aoiLayer = L.geoJSON(gisCoverage.noaaRestrictedGeoJson, {
+      style: {
+        color: "#0284c7",
+        fillColor: "#38bdf8",
+        weight: 2.5,
+        fillOpacity: 0.16,
+      },
+    })
+      .bindPopup(
+        `<strong>Pipe GIS Coverage AOI (${gisCoverage.sourceFileName})</strong><br/>` +
+          `Features: ${gisCoverage.featureCount.toLocaleString()}<br/>` +
+          `Area: ${gisCoverage.areaSqMiles} sq mi (${gisCoverage.areaAcres} acres)<br/>` +
+          `CRS: ${gisCoverage.sourceCrs} &rarr; EPSG:4326`
+      )
+      .addTo(group);
+
+    // 2. Draw loaded Water System GIS features (pipes, tanks, pumps, pressure zones, demands)
+    for (const overlay of gisCoverage.layerOverlays) {
+      L.geoJSON(overlay.wgs84GeoJson, {
+        style: {
+          color: overlay.color,
+          weight: overlay.key === "pipe" ? 2.5 : 2,
+          fillOpacity: overlay.key === "pressure_zone" ? 0.12 : 0.25,
+        },
+        pointToLayer: (_feat: unknown, latlng: [number, number]) =>
+          L.circleMarker(latlng, {
+            radius:
+              overlay.key === "tank" ||
+              overlay.key === "pump" ||
+              overlay.key === "wtp"
+                ? 6
+                : 4,
+            color: "#ffffff",
+            weight: 1.5,
+            fillColor: overlay.color,
+            fillOpacity: 0.9,
+          }),
+      })
+        .bindPopup(
+          `<strong>${overlay.label}</strong> (${overlay.fileName})<br/>` +
+            `${overlay.featureCount} feature(s)`
+        )
+        .addTo(group);
+    }
+
+    // 3. Draw Intersecting NOAA S3 DEM Tile Footprints (#10b981 green, same as main.d3nvwo119rglg1.amplifyapp.com)
+    for (const tile of demIntersectingTiles) {
+      L.geoJSON(tile.geometry, {
+        style: {
+          color: "#10b981",
+          fillColor: "#10b981",
+          weight: 2,
+          fillOpacity: 0.15,
+        },
+      })
+        .bindPopup(
+          `<strong>${tile.filename}</strong><br/>` +
+            `<a href="${tile.url}" target="_blank" rel="noreferrer">Direct S3 DEM Tile Link</a>`
+        )
+        .addTo(group);
+    }
+
+    try {
+      const bounds = aoiLayer.getBounds();
+      map.invalidateSize();
+      map.fitBounds(bounds, { padding: [22, 22] });
+      setTimeout(() => {
+        map.invalidateSize();
+        map.fitBounds(bounds, { padding: [22, 22] });
+      }, 120);
+    } catch {
+      // Ignore bounds error
+    }
+  }, [gisCoverage, demIntersectingTiles]);
+
+  // Persist waterJsonFolder and auto-scan on startup so pipe.json is ready
+  useEffect(() => {
+    try {
+      if (waterJsonFolder.trim()) {
+        localStorage.setItem(
+          WATER_JSON_FOLDER_STORAGE_KEY,
+          waterJsonFolder.trim()
+        );
+      }
+    } catch {
+      // Ignore storage error
+    }
+  }, [waterJsonFolder]);
+
+  useEffect(() => {
+    void (async () => {
+      const initial = await scanLocalWaterJsonFolder(waterJsonFolder);
+      if (Object.keys(initial).length === 0) {
+        const fallbackFolder = "D:\\AI\\agent\\epanet-auto\\water-json";
+        if (waterJsonFolder !== fallbackFolder) {
+          setWaterJsonFolder(fallbackFolder);
+          await scanLocalWaterJsonFolder(fallbackFolder);
+        }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // If pipe.json is loaded/updated while DEM coverage is displayed, recompute coverage strictly from pipe.json
+  useEffect(() => {
+    if (!gisCoverage || !waterLayers.pipe) return;
+    const updatedCoverage = computeGisCoverageForWaterSystem(
+      { pipe: waterLayers.pipe },
+      targetCrs
+    );
+    setGisCoverage(updatedCoverage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waterLayers.pipe, targetCrs]);
 
   useEffect(() => {
     try {
@@ -689,6 +921,23 @@ function App({ user, signOut }: AppProps) {
       try {
         const rawText = await file.text();
         const info = parseWaterJsonFile(file.name, rawText, forcedKey);
+        if (
+          !forcedKey &&
+          info.key === "pipe" &&
+          files.length > 1 &&
+          !isLikelyPipeJsonFile(file.name, info.data)
+        ) {
+          continue;
+        }
+        if (
+          !forcedKey &&
+          info.key === "pipe" &&
+          updated.pipe &&
+          updated.pipe.fileName.toLowerCase() === "pipe.json" &&
+          file.name.toLowerCase() !== "pipe.json"
+        ) {
+          continue;
+        }
         updated[info.key] = info;
       } catch (err) {
         setUploadError(
@@ -753,8 +1002,34 @@ function App({ user, signOut }: AppProps) {
 
       const updated: Partial<Record<WaterLayerKey, UploadedLayerInfo>> = {};
       for (const file of files) {
+        const lowerName = file.name.toLowerCase();
+        if (
+          files.length > 1 &&
+          (lowerName.includes("backflow") ||
+            lowerName.includes("fitting") ||
+            lowerName.includes("valve") ||
+            lowerName.includes("network_structure") ||
+            lowerName.includes("psite"))
+        ) {
+          continue;
+        }
         try {
           const info = parseWaterJsonFile(file.name, file.content);
+          if (
+            info.key === "pipe" &&
+            files.length > 1 &&
+            !isLikelyPipeJsonFile(file.name, info.data)
+          ) {
+            continue;
+          }
+          if (
+            info.key === "pipe" &&
+            updated.pipe &&
+            updated.pipe.fileName.toLowerCase() === "pipe.json" &&
+            lowerName !== "pipe.json"
+          ) {
+            continue;
+          }
           updated[info.key] = info;
         } catch (err) {
           setUploadError(
@@ -764,6 +1039,7 @@ function App({ user, signOut }: AppProps) {
       }
 
       if (Object.keys(updated).length > 0) {
+        lastScannedFolderRef.current = trimmedFolder;
         setWaterLayers((prev) => ({ ...prev, ...updated }));
         setFolderScanStatus(
           `Scanned "${data.folderPath || trimmedFolder}" → loaded ${
@@ -784,44 +1060,139 @@ function App({ user, signOut }: AppProps) {
   }
 
   async function handleDemDownloadClick() {
-    if (isDownloadingDem) return;
+    if (isDownloadingDem || isSearchingDemCoverage) return;
 
-    setIsDownloadingDem(true);
+    setIsSearchingDemCoverage(true);
     setDemDownloadError(null);
+    setDemIntersectingTiles([]);
     setDemDownloadProgress({
-      percent: 5,
-      stage: "Initializing DEM Download",
-      detail: "Preparing DEM elevation download in memory...",
+      percent: 15,
+      stage: "Mapping Pipe GIS Data Coverage",
+      detail:
+        "Extracting pipe.json coverage polygon (EPSG:4326) and querying NOAA Digital Coast catalog...",
     });
 
     try {
       let activeLayers = waterLayers;
-      if (Object.keys(activeLayers).length === 0 && waterJsonFolder.trim()) {
-        setDemDownloadProgress({
-          percent: 8,
-          stage: "Scanning Water System JSONs",
-          detail: `Reading water system AOI from ${waterJsonFolder.trim()}...`,
-        });
-        const scanned = await scanLocalWaterJsonFolder(waterJsonFolder);
+      const trimmedFolder = waterJsonFolder.trim();
+      if (
+        trimmedFolder &&
+        (!activeLayers.pipe || lastScannedFolderRef.current !== trimmedFolder)
+      ) {
+        const scanned = await scanLocalWaterJsonFolder(trimmedFolder);
         if (Object.keys(scanned).length > 0) {
           activeLayers = { ...activeLayers, ...scanned };
+        } else {
+          setUploadError(null);
         }
+      }
+      if (!activeLayers.pipe) {
+        const sampleLayers = createSampleWaterSystemLayers();
+        activeLayers = { ...activeLayers, pipe: sampleLayers.pipe };
+      }
+
+      const discovered = await discoverDemOptionsForWaterSystem({
+        layers: activeLayers,
+        targetCrs,
+      });
+
+      setGisCoverage(discovered.coverage);
+      setAvailableDemDatasets(discovered.datasets);
+
+      const defaultOption =
+        discovered.datasets.find((d) => d.recommended) ||
+        discovered.datasets[0] ||
+        null;
+      setSelectedDemMissionId(defaultOption ? defaultOption.missionId : null);
+
+      setDemDownloadProgress({
+        percent: 35,
+        stage: "Select Available DEM Dataset",
+        detail: `Coverage from ${discovered.coverage.sourceFileName} (${discovered.coverage.featureCount.toLocaleString()} features): ${discovered.coverage.areaSqMiles} sq mi (${discovered.coverage.areaAcres} acres). Found ${discovered.datasets.length} NOAA DEM/LiDAR dataset(s) — choose one below.`,
+      });
+
+      const optionsMarkdown = discovered.datasets
+        .map(
+          (d, idx) =>
+            `${idx + 1}. **[${d.dataType}] ${d.title}** — Mission \`#${d.missionId}\` | Year: \`${d.year}\` | VDatum: \`${d.verticalDatum}\`${
+              d.bulkDownloadUrl ? " | `Direct S3 Bulk Tiles`" : ""
+            }${d.recommended ? " *(Recommended)*" : ""}`
+        )
+        .join("\n");
+
+      appendAgentConversationPair(
+        `Show pipe.json GIS coverage map and search available DEM options on ${DEM_DOWNLOAD_URL}`,
+        [
+          `### 🗺️ Pipe GIS Coverage & Available NOAA DEM Options`,
+          `- **Coverage Source File:** \`${discovered.coverage.sourceFileName}\` (\`${discovered.coverage.featureCount.toLocaleString()}\` pipe features)`,
+          `- **Detected CRS:** \`${discovered.coverage.sourceCrs} → EPSG:4326\``,
+          `- **Pipe Coverage Area:** \`${discovered.coverage.areaSqMiles} sq mi\` (\`${discovered.coverage.areaAcres} acres\`)`,
+          `- **Vertices:** \`${discovered.coverage.originalVertexCount}\` (simplified to \`${discovered.coverage.simplifiedVertexCount}\`)`,
+          `- **WGS84 Bounding Box:** \`[${discovered.coverage.bbox4326.join(", ")}]\``,
+          "",
+          `#### Available Datasets (${discovered.datasets.length} found) — Please choose one in Step 2:`,
+          optionsMarkdown,
+        ].join("\n")
+      );
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : "Failed to search GIS DEM coverage.";
+      setDemDownloadError(msg);
+      setDemDownloadProgress(null);
+    } finally {
+      setIsSearchingDemCoverage(false);
+    }
+  }
+
+  async function handleConfirmDemDatasetDownload(
+    overrideDataset?: NoaaDemDatasetOption
+  ) {
+    if (isDownloadingDem) return;
+
+    const chosenDataset =
+      overrideDataset ||
+      availableDemDatasets.find((d) => d.missionId === selectedDemMissionId) ||
+      availableDemDatasets[0];
+
+    if (!chosenDataset) return;
+
+    setSelectedDemMissionId(chosenDataset.missionId);
+    setIsDownloadingDem(true);
+    setDemDownloadError(null);
+    setDemDownloadProgress({
+      percent: 10,
+      stage: "Initializing Selected DEM Download",
+      detail: `Preparing download for [${chosenDataset.dataType}] ${chosenDataset.title} (Mission #${chosenDataset.missionId})...`,
+    });
+
+    try {
+      let activeLayers = waterLayers;
+      if (Object.keys(activeLayers).length === 0) {
+        activeLayers = createSampleWaterSystemLayers();
       }
 
       const result = await downloadDemForWaterSystem({
         layers: activeLayers,
         targetCrs,
+        selectedDataset: chosenDataset,
+        coverage: gisCoverage || undefined,
         onProgress: (prog) => {
           setDemDownloadProgress(prog);
         },
       });
+
+      if (result.intersectingTiles.length > 0) {
+        setDemIntersectingTiles(result.intersectingTiles);
+      }
 
       setDemTileNames((prev) =>
         Array.from(new Set([...prev, ...result.tifFiles]))
       );
 
       appendAgentConversationPair(
-        `Download DEM GeoTIFF tiles from ${DEM_DOWNLOAD_URL}`,
+        `Download selected DEM dataset: [${chosenDataset.dataType}] ${chosenDataset.title} (Mission #${chosenDataset.missionId})`,
         result.markdownSummary
       );
     } catch (err) {
@@ -2072,9 +2443,11 @@ function App({ user, signOut }: AppProps) {
                 type="button"
                 className="layer-upload-btn"
                 onClick={handleDemDownloadClick}
-                disabled={isDownloadingDem}
+                disabled={isDownloadingDem || isSearchingDemCoverage}
               >
-                {isDownloadingDem
+                {isSearchingDemCoverage
+                  ? "⏳ Mapping Coverage..."
+                  : isDownloadingDem
                   ? `⏳ Downloading (${demDownloadProgress?.percent ?? 0}%)...`
                   : "⬇ Download DEM"}
               </button>
@@ -2106,6 +2479,169 @@ function App({ user, signOut }: AppProps) {
                 <div className="dem-progress-detail">
                   {demDownloadProgress.detail}
                 </div>
+              </div>
+            )}
+
+            {gisCoverage && (
+              <div className="dem-coverage-section">
+                <div className="dem-coverage-header">
+                  <span className="dem-coverage-title">
+                    🗺️ GIS Data Coverage ({gisCoverage.sourceFileName})
+                  </span>
+                  <span className="dem-coverage-badge">
+                    {gisCoverage.areaSqMiles} sq mi ({gisCoverage.areaAcres}{" "}
+                    acres)
+                  </span>
+                </div>
+
+                <div
+                  ref={demMapContainerRef}
+                  className="dem-leaflet-map"
+                  aria-label="GIS Data Coverage Map"
+                />
+
+                <div className="dem-coverage-stats">
+                  <div>
+                    <strong>File:</strong> {gisCoverage.sourceFileName} (
+                    {gisCoverage.featureCount.toLocaleString()} features) |{" "}
+                    <strong>CRS:</strong> {gisCoverage.sourceCrs} &rarr;
+                    EPSG:4326
+                  </div>
+                  <div>
+                    <strong>Area:</strong> {gisCoverage.areaSqMiles} sq mi (
+                    {gisCoverage.areaAcres} acres) | <strong>Vertices:</strong>{" "}
+                    {gisCoverage.originalVertexCount} (simplified to{" "}
+                    {gisCoverage.simplifiedVertexCount})
+                  </div>
+                  <div>
+                    <strong>WGS84 BBox:</strong> [
+                    {gisCoverage.bbox4326.map((n) => n.toFixed(4)).join(", ")}]
+                  </div>
+                </div>
+
+                <div className="dem-coverage-legend">
+                  <span className="dem-legend-item">
+                    <span
+                      className="dem-legend-swatch"
+                      style={{ background: "#38bdf8", borderColor: "#0284c7" }}
+                    />
+                    AOI Coverage
+                  </span>
+                  {gisCoverage.layerOverlays.map((ov) => (
+                    <span key={ov.key} className="dem-legend-item">
+                      <span
+                        className="dem-legend-swatch"
+                        style={{ background: ov.color, borderColor: ov.color }}
+                      />
+                      {ov.label} ({ov.featureCount})
+                    </span>
+                  ))}
+                  {demIntersectingTiles.length > 0 && (
+                    <span className="dem-legend-item">
+                      <span
+                        className="dem-legend-swatch"
+                        style={{
+                          background: "rgba(16, 185, 129, 0.35)",
+                          borderColor: "#10b981",
+                        }}
+                      />
+                      DEM Tiles ({demIntersectingTiles.length})
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {availableDemDatasets.length > 0 && (
+              <div className="dem-options-section">
+                <div className="dem-options-header">
+                  <span className="dem-options-title">
+                    📋 Available DEM &amp; LiDAR Options (
+                    {availableDemDatasets.length})
+                  </span>
+                  <span className="dem-options-prompt">
+                    Choose one to download:
+                  </span>
+                </div>
+
+                <div className="dem-options-list">
+                  {availableDemDatasets.map((ds) => {
+                    const isSelected = selectedDemMissionId === ds.missionId;
+                    const isDemType = ds.dataType.toUpperCase() === "DEM";
+                    return (
+                      <div
+                        key={ds.missionId}
+                        className={`dem-option-card ${
+                          isSelected ? "selected" : ""
+                        }`}
+                        onClick={() => setSelectedDemMissionId(ds.missionId)}
+                      >
+                        <div className="dem-option-top">
+                          <label className="dem-option-radio-label">
+                            <input
+                              type="radio"
+                              name="demDatasetChoice"
+                              checked={isSelected}
+                              onChange={() =>
+                                setSelectedDemMissionId(ds.missionId)
+                              }
+                            />
+                            <span
+                              className={`dem-datatype-badge ${
+                                isDemType ? "dem" : "lidar"
+                              }`}
+                            >
+                              {ds.dataType.toUpperCase()}
+                            </span>
+                            <span className="dem-option-title">{ds.title}</span>
+                          </label>
+                          {ds.recommended && (
+                            <span className="dem-recommended-pill">
+                              Recommended
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="dem-option-meta">
+                          <span>
+                            Mission ID: <strong>#{ds.missionId}</strong>
+                          </span>
+                          <span>·</span>
+                          <span>
+                            Year: <strong>{ds.year}</strong>
+                          </span>
+                          <span>·</span>
+                          <span>
+                            VDatum: <strong>{ds.verticalDatum}</strong>
+                          </span>
+                          <span>·</span>
+                          <span className="dem-source-tag">
+                            {ds.bulkDownloadUrl
+                              ? "S3 Bulk Tiles"
+                              : "NOAA DAV"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <button
+                  type="button"
+                  className="dem-confirm-download-btn"
+                  onClick={() => void handleConfirmDemDatasetDownload()}
+                  disabled={isDownloadingDem || !selectedDemMissionId}
+                >
+                  {isDownloadingDem
+                    ? `⏳ Downloading Selected DEM (${
+                        demDownloadProgress?.percent ?? 0
+                      }%)...`
+                    : `⬇ Download Selected DEM Data${
+                        selectedDemMissionId
+                          ? ` (Mission #${selectedDemMissionId})`
+                          : ""
+                      }`}
+                </button>
               </div>
             )}
 

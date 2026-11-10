@@ -1,10 +1,71 @@
 {
   "type": "FeatureCollection",
+  "crs": {
+    "type": "name",
+    "properties": {
+      "name": "EPSG:6318"
+    }
+  },
   "features": [
     {
       "type": "Feature",
-      "properties": { "Name": "Central Elevated Tank", "Overflow": 515, "Depth": 35, "Diameter": 65, "ELEV_FT": 480 },
-      "geometry": { "type": "Point", "coordinates": [2014985, 745010] }
+      "id": 1,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.263488967448041, 26.76511159058769]
+      },
+      "properties": {
+        "FID": 1,
+        "Rotation": 86.485547490000002,
+        "LifecycleS": "Active",
+        "Subtype": 1,
+        "Name": " "
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 2,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.263466038877297, 26.764848296574463]
+      },
+      "properties": {
+        "FID": 2,
+        "Rotation": 93.79831677,
+        "LifecycleS": "Active",
+        "Subtype": 1,
+        "Name": " "
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 8,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.242918240854067, 26.888699890118399]
+      },
+      "properties": {
+        "FID": 8,
+        "Rotation": 0,
+        "LifecycleS": "Active",
+        "Subtype": 1,
+        "Name": " "
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 9,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.242933152575986, 26.88890198125852]
+      },
+      "properties": {
+        "FID": 9,
+        "Rotation": 0,
+        "LifecycleS": "Active",
+        "Subtype": 1,
+        "Name": " "
+      }
     }
   ]
 }

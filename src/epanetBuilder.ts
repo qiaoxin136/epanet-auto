@@ -154,16 +154,68 @@ export interface DemDownloadProgress {
   totalBytes?: number;
 }
 
+export interface GisLayerOverlaySummary {
+  key: WaterLayerKey;
+  label: string;
+  fileName: string;
+  featureCount: number;
+  color: string;
+  wgs84GeoJson: GeoJsonFeatureCollection;
+}
+
+export interface GisCoverageSummary {
+  sourceFileName: string;
+  sourceCrs: string;
+  featureCount: number;
+  originalVertexCount: number;
+  simplifiedVertexCount: number;
+  areaSqMiles: number;
+  areaAcres: number;
+  bbox4326: [number, number, number, number];
+  bbox3857: [number, number, number, number];
+  wktAoi: string;
+  ring4326: Array<[number, number]>;
+  noaaRestrictedGeoJson: GeoJsonFeatureCollection;
+  layerOverlays: GisLayerOverlaySummary[];
+  usingFallbackAoi: boolean;
+}
+
+export interface NoaaDemDatasetOption {
+  missionId: string;
+  title: string;
+  year: string;
+  dataType: string;
+  verticalDatum: string;
+  bulkDownloadUrl: string | null;
+  externalPortalUrl: string | null;
+  metadataUrl: string | null;
+  customDownloadUrl: string | null;
+  recommended: boolean;
+}
+
+export interface DemIntersectingTile {
+  filename: string;
+  url: string;
+  bbox: [number, number, number, number];
+  geometry: {
+    type: "Polygon";
+    coordinates: Array<Array<[number, number]>>;
+  };
+}
+
 export interface DemDownloadResult {
   fileName: string;
   fileSizeBytes: number;
   missionId: string;
   missionTitle: string;
+  year?: string;
+  dataType?: string;
   verticalDatum: string;
   s3BulkUrl: string | null;
   bbox4326: [number, number, number, number];
   savedToDiskPath: string | null;
   tifFiles: string[];
+  intersectingTiles: DemIntersectingTile[];
   markdownSummary: string;
 }
 
@@ -191,20 +243,48 @@ export function getLayerStandardIdRange(key: WaterLayerKey, count: number): stri
   }
 }
 
+export function isLikelyPipeJsonFile(
+  fileName: string,
+  parsed?: GeoJsonFeatureCollection
+): boolean {
+  const lower = fileName.toLowerCase();
+  if (
+    lower.includes("valve") ||
+    lower.includes("fitting") ||
+    lower.includes("backflow") ||
+    lower.includes("fireflow") ||
+    lower.includes("structure") ||
+    lower.includes("psite") ||
+    lower.includes("tank") ||
+    lower.includes("pump") ||
+    lower.includes("meter") ||
+    lower.includes("demand") ||
+    lower.includes("hydrant") ||
+    lower.includes("wtp")
+  ) {
+    return false;
+  }
+  if (lower.includes("pipe") || lower.includes("main") || lower.includes("line")) {
+    return true;
+  }
+  const firstGeom = parsed?.features?.[0]?.geometry?.type || "";
+  return firstGeom.includes("LineString");
+}
+
 export function detectWaterLayerKey(
   fileName: string,
   parsed: GeoJsonFeatureCollection
 ): WaterLayerKey {
   const lower = fileName.toLowerCase();
   if (lower.includes("tank")) return "tank";
-  if (lower.includes("pump")) return "pump";
+  if (lower.includes("pump") || /^ps(_|\b|\.json)/.test(lower)) return "pump";
   if (lower.includes("demand") || lower.includes("meter") || lower.includes("customer"))
     return "water_demand";
   if (lower.includes("pressure") || lower.includes("zone") || lower.includes("pz"))
     return "pressure_zone";
   if (lower.includes("wtp") || lower.includes("plant") || lower.includes("reservoir"))
     return "wtp";
-  if (lower.includes("hydrant")) return "hydrant";
+  if (lower.includes("hydrant") || lower.includes("fireflow")) return "hydrant";
   if (lower.includes("pipe") || lower.includes("main") || lower.includes("line"))
     return "pipe";
 
@@ -531,8 +611,16 @@ export function auditWaterSystem(
 
 function toStatePlaneFeet(coord: [number, number]): [number, number] {
   const [x, y] = coord;
-  // Convert WGS84 lon/lat to approximate NAD83 NC State Plane Feet (EPSG:2264) if in degrees
   if (Math.abs(x) <= 180 && Math.abs(y) <= 90) {
+    // Florida coordinates (e.g. Gasparilla Island, FL in NAD83 Florida West ftUS EPSG:2882)
+    if (x >= -88.0 && x <= -79.5 && y >= 24.0 && y <= 31.5) {
+      const refLon = -82.0;
+      const refLat = 24.3333333333333;
+      const xFt = 656166.67 + (x - refLon) * 328000;
+      const yFt = (y - refLat) * 364100;
+      return [Number(xFt.toFixed(2)), Number(yFt.toFixed(2))];
+    }
+    // Default NAD83 NC State Plane Feet (EPSG:2264)
     const refLon = -79.18;
     const refLat = 35.48;
     const xFt = 2015000 + (x - refLon) * 298000;
@@ -1291,8 +1379,13 @@ export function recalculateBuildResultFromInp(
 export function createSampleWaterSystemLayers(): Partial<
   Record<WaterLayerKey, UploadedLayerInfo>
 > {
+  // Default fallback matches Gasparilla Island, Florida (EPSG:6318 / EPSG:4326)
   const samplePipeGeoJson: GeoJsonFeatureCollection = {
     type: "FeatureCollection",
+    crs: {
+      type: "name",
+      properties: { name: "urn:ogc:def:crs:EPSG::6318" },
+    },
     features: [
       {
         type: "Feature",
@@ -1300,41 +1393,44 @@ export function createSampleWaterSystemLayers(): Partial<
         geometry: {
           type: "LineString",
           coordinates: [
-            [2015000, 745000],
-            [2015650, 745200],
+            [-82.2601, 26.7194],
+            [-82.2635, 26.7465],
+            [-82.2682, 26.7745],
           ],
         },
       },
       {
         type: "Feature",
-        properties: { FacilityID: "P00002", Diameter: 10, Material: "PVC", Roughness: 130 },
+        properties: { FacilityID: "P00002", Diameter: 12, Material: "PVC", Roughness: 130 },
         geometry: {
           type: "LineString",
           coordinates: [
-            [2015650, 745200],
-            [2016300, 745450],
+            [-82.2682, 26.7745],
+            [-82.2755, 26.8012],
+            [-82.2821, 26.8080],
           ],
         },
       },
       {
         type: "Feature",
-        properties: { FacilityID: "P00003", Diameter: 8, Material: "DIP", Roughness: 110 },
+        properties: { FacilityID: "P00003", Diameter: 16, Material: "DIP", Roughness: 130 },
         geometry: {
           type: "LineString",
           coordinates: [
-            [2016300, 745450],
-            [2017100, 745900],
+            [-82.2821, 26.8080],
+            [-82.2705, 26.8350],
+            [-82.2540, 26.8615],
           ],
         },
       },
       {
         type: "Feature",
-        properties: { FacilityID: "P00004", Diameter: 8, Material: "PVC", Roughness: 120 },
+        properties: { FacilityID: "P00004", Diameter: 16, Material: "PVC", Roughness: 130 },
         geometry: {
           type: "LineString",
           coordinates: [
-            [2015650, 745200],
-            [2015800, 744600],
+            [-82.2540, 26.8615],
+            [-82.2367, 26.8886],
           ],
         },
       },
@@ -1343,20 +1439,24 @@ export function createSampleWaterSystemLayers(): Partial<
 
   const sampleTankGeoJson: GeoJsonFeatureCollection = {
     type: "FeatureCollection",
+    crs: {
+      type: "name",
+      properties: { name: "urn:ogc:def:crs:EPSG::6318" },
+    },
     features: [
       {
         type: "Feature",
         properties: {
           FacilityID: "T001",
-          Name: "Central Elevated Tank",
-          Overflow: 515,
+          Name: "Gasparilla Island Elevated Tank",
+          Overflow: 135,
           Depth: 35,
           Diameter: 65,
-          ELEV_FT: 480,
+          ELEV_FT: 8,
         },
         geometry: {
           type: "Point",
-          coordinates: [2015010, 745015],
+          coordinates: [-82.2632, 26.7485],
         },
       },
     ],
@@ -1364,19 +1464,23 @@ export function createSampleWaterSystemLayers(): Partial<
 
   const samplePumpGeoJson: GeoJsonFeatureCollection = {
     type: "FeatureCollection",
+    crs: {
+      type: "name",
+      properties: { name: "urn:ogc:def:crs:EPSG::6318" },
+    },
     features: [
       {
         type: "Feature",
         properties: {
           FacilityID: "pump001",
-          Name: "High Zone Booster Station",
+          Name: "Gasparilla Booster Station",
           GPM: 1250,
           HeadFt: 118,
           Status: "OPEN",
         },
         geometry: {
           type: "Point",
-          coordinates: [2016290, 745440],
+          coordinates: [-82.2371, 26.8882],
         },
       },
     ],
@@ -1384,56 +1488,48 @@ export function createSampleWaterSystemLayers(): Partial<
 
   const sampleDemandGeoJson: GeoJsonFeatureCollection = {
     type: "FeatureCollection",
+    crs: {
+      type: "name",
+      properties: { name: "urn:ogc:def:crs:EPSG::6318" },
+    },
     features: [
       {
         type: "Feature",
         properties: { MeterID: "M-101", GPM: 85.5, Category: "Residential" },
-        geometry: { type: "Point", coordinates: [2015640, 745195] },
+        geometry: { type: "Point", coordinates: [-82.2625, 26.7452] },
       },
       {
         type: "Feature",
         properties: { MeterID: "M-102", GPM: 142.0, Category: "Commercial" },
-        geometry: { type: "Point", coordinates: [2016305, 745455] },
+        geometry: { type: "Point", coordinates: [-82.2675, 26.7735] },
       },
       {
         type: "Feature",
-        properties: { MeterID: "M-103", GPM: 64.5, Category: "Industrial" },
-        geometry: { type: "Point", coordinates: [2015805, 744605] },
+        properties: { MeterID: "M-103", GPM: 64.5, Category: "Residential" },
+        geometry: { type: "Point", coordinates: [-82.2745, 26.7985] },
       },
     ],
   };
 
   const samplePzGeoJson: GeoJsonFeatureCollection = {
     type: "FeatureCollection",
+    crs: {
+      type: "name",
+      properties: { name: "urn:ogc:def:crs:EPSG::6318" },
+    },
     features: [
       {
         type: "Feature",
-        properties: { FacilityID: "PZ01", Name: "Central Pressure Zone", HGL_Ft: 515 },
+        properties: { FacilityID: "PZ01", Name: "Gasparilla Island Zone", HGL_Ft: 135 },
         geometry: {
           type: "Polygon",
           coordinates: [
             [
-              [2014500, 744200],
-              [2016600, 744200],
-              [2016600, 745700],
-              [2014500, 745700],
-              [2014500, 744200],
-            ],
-          ],
-        },
-      },
-      {
-        type: "Feature",
-        properties: { FacilityID: "PZ02", Name: "North High Pressure Zone", HGL_Ft: 620 },
-        geometry: {
-          type: "Polygon",
-          coordinates: [
-            [
-              [2016600, 745500],
-              [2017600, 745500],
-              [2017600, 746400],
-              [2016600, 746400],
-              [2016600, 745500],
+              [-82.283, 26.718],
+              [-82.258, 26.718],
+              [-82.258, 26.815],
+              [-82.283, 26.815],
+              [-82.283, 26.718],
             ],
           ],
         },
@@ -1443,27 +1539,35 @@ export function createSampleWaterSystemLayers(): Partial<
 
   const sampleWtpGeoJson: GeoJsonFeatureCollection = {
     type: "FeatureCollection",
+    crs: {
+      type: "name",
+      properties: { name: "urn:ogc:def:crs:EPSG::6318" },
+    },
     features: [
       {
         type: "Feature",
-        properties: { FacilityID: "WTP001", Name: "Main River WTP", HeadFt: 525 },
-        geometry: { type: "Point", coordinates: [2014980, 744990] },
+        properties: { FacilityID: "WTP001", Name: "GIWA Mainland WTP", HeadFt: 145 },
+        geometry: { type: "Point", coordinates: [-82.2367, 26.8886] },
       },
     ],
   };
 
   const sampleHydrantGeoJson: GeoJsonFeatureCollection = {
     type: "FeatureCollection",
+    crs: {
+      type: "name",
+      properties: { name: "urn:ogc:def:crs:EPSG::6318" },
+    },
     features: [
       {
         type: "Feature",
         properties: { FacilityID: "H00001", FlowClass: "AA" },
-        geometry: { type: "Point", coordinates: [2015655, 745205] },
+        geometry: { type: "Point", coordinates: [-82.2635, 26.7465] },
       },
       {
         type: "Feature",
         properties: { FacilityID: "H00002", FlowClass: "A" },
-        geometry: { type: "Point", coordinates: [2016300, 745450] },
+        geometry: { type: "Point", coordinates: [-82.2682, 26.7745] },
       },
     ],
   };
@@ -1516,34 +1620,116 @@ function convertPointToWgs84(
   }
 
   const crsUpper = (targetCrs || "").toUpperCase();
-  if (
+  const isFlWest = crsUpper.includes("2882") || crsUpper.includes("2237");
+  const isFlEast =
     crsUpper.includes("2881") ||
-    (x >= 450000 && x <= 1050000 && y >= 200000 && y <= 2200000 && !crsUpper.includes("2264"))
-  ) {
-    // Approximate inverse Transverse Mercator for NAD83 Florida East (ftUS, EPSG:2881)
-    const falseEastingFt = 656166.667;
-    const lat0 = 24.3333333333333;
-    const lon0 = -81.0;
-    const dLat = (y - 0) / 364000;
-    const lat = lat0 + dLat;
-    const dLon = (x - falseEastingFt) / (365228 * Math.cos((lat * Math.PI) / 180));
-    const lon = lon0 + dLon;
-    return [
-      Number(Math.max(-87.6, Math.min(-79.8, lon)).toFixed(6)),
-      Number(Math.max(24.3, Math.min(31.0, lat)).toFixed(6)),
-    ];
+    crsUpper.includes("2236") ||
+    (!isFlWest &&
+      x >= 450000 &&
+      x <= 1050000 &&
+      y >= 200000 &&
+      y <= 2200000 &&
+      !crsUpper.includes("2264"));
+
+  if (isFlWest || isFlEast) {
+    // Exact inverse Transverse Mercator for NAD83 Florida West (EPSG:2882, lon0=-82) or Florida East (EPSG:2881, lon0=-81)
+    const ftToM = 1200 / 3937;
+    const xM = x * ftToM - 200000.0001016;
+    const yM = y * ftToM;
+    const a = 6378137.0;
+    const f = 1 / 298.257222101;
+    const e2 = 2 * f - f * f;
+    const e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2));
+    const k0 = 0.999941177;
+    const lat0 = (24.3333333333333 * Math.PI) / 180;
+    const lon0 = ((isFlWest ? -82.0 : -81.0) * Math.PI) / 180;
+    const M0 =
+      a *
+      ((1 - e2 / 4 - (3 * e2 * e2) / 64 - (5 * e2 * e2 * e2) / 256) * lat0 -
+        ((3 * e2) / 8 + (3 * e2 * e2) / 32 + (45 * e2 * e2 * e2) / 1024) *
+          Math.sin(2 * lat0) +
+        ((15 * e2 * e2) / 256 + (45 * e2 * e2 * e2) / 1024) *
+          Math.sin(4 * lat0));
+    const M = M0 + yM / k0;
+    const mu =
+      M / (a * (1 - e2 / 4 - (3 * e2 * e2) / 64 - (5 * e2 * e2 * e2) / 256));
+    const phi1 =
+      mu +
+      ((3 * e1) / 2 - (27 * Math.pow(e1, 3)) / 32) * Math.sin(2 * mu) +
+      ((21 * e1 * e1) / 16 - (55 * Math.pow(e1, 4)) / 32) * Math.sin(4 * mu) +
+      ((151 * Math.pow(e1, 3)) / 96) * Math.sin(6 * mu);
+    const ep2 = e2 / (1 - e2);
+    const N1 = a / Math.sqrt(1 - e2 * Math.sin(phi1) * Math.sin(phi1));
+    const T1 = Math.tan(phi1) * Math.tan(phi1);
+    const C1 = ep2 * Math.cos(phi1) * Math.cos(phi1);
+    const R1 =
+      (a * (1 - e2)) /
+      Math.pow(1 - e2 * Math.sin(phi1) * Math.sin(phi1), 1.5);
+    const D = xM / (N1 * k0);
+    const lat =
+      phi1 -
+      ((N1 * Math.tan(phi1)) / R1) *
+        ((D * D) / 2 -
+          ((5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * ep2) * Math.pow(D, 4)) /
+            24);
+    const lon =
+      lon0 +
+      (D -
+        ((1 + 2 * T1 + C1) * Math.pow(D, 3)) / 6 +
+        ((5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * ep2 + 24 * T1 * T1) *
+          Math.pow(D, 5)) /
+          120) /
+        Math.cos(phi1);
+    return [(lon * 180) / Math.PI, (lat * 180) / Math.PI];
   }
 
-  // Default: NAD83 North Carolina State Plane (ftUS, EPSG:2264)
-  const falseEastingFt = 2000000.0;
-  const lat0 = 33.75;
-  const lon0 = -79.0;
-  const lat = lat0 + y / 364150;
-  const lon = lon0 + (x - falseEastingFt) / (365228 * Math.cos((lat * Math.PI) / 180));
-  return [
-    Number(Math.max(-84.5, Math.min(-75.4, lon)).toFixed(6)),
-    Number(Math.max(33.8, Math.min(36.6, lat)).toFixed(6)),
-  ];
+  // Exact inverse Lambert Conformal Conic for NAD83 North Carolina State Plane (ftUS, EPSG:2264)
+  // Matches proj4: +proj=lcc +lat_1=36.16666666666666 +lat_2=34.33333333333334 +lat_0=33.75 +lon_0=-79 +x_0=609601.2192024384 +y_0=0 +datum=NAD83 +units=us-ft
+  const ftToM = 1200 / 3937;
+  const xM = x * ftToM - 609601.2192024384;
+  const yM = y * ftToM;
+  const a = 6378137.0;
+  const f = 1 / 298.257222101;
+  const e = Math.sqrt(2 * f - f * f);
+  const phi1 = (36.16666666666666 * Math.PI) / 180;
+  const phi2 = (34.33333333333334 * Math.PI) / 180;
+  const phi0 = (33.75 * Math.PI) / 180;
+  const lam0 = (-79.0 * Math.PI) / 180;
+
+  const calcM = (phi: number) =>
+    Math.cos(phi) / Math.sqrt(1 - Math.pow(e * Math.sin(phi), 2));
+  const calcT = (phi: number) =>
+    Math.tan(Math.PI / 4 - phi / 2) /
+    Math.pow((1 - e * Math.sin(phi)) / (1 + e * Math.sin(phi)), e / 2);
+
+  const m1 = calcM(phi1);
+  const m2 = calcM(phi2);
+  const t1 = calcT(phi1);
+  const t2 = calcT(phi2);
+  const t0 = calcT(phi0);
+  const n = (Math.log(m1) - Math.log(m2)) / (Math.log(t1) - Math.log(t2));
+  const F = m1 / (n * Math.pow(t1, n));
+  const rho0 = a * F * Math.pow(t0, n);
+  const dy = rho0 - yM;
+  const rho = Math.sign(n) * Math.sqrt(xM * xM + dy * dy);
+  const theta = Math.atan2(xM, dy);
+  const t = Math.pow(rho / (a * F), 1 / n);
+
+  let phi = Math.PI / 2 - 2 * Math.atan(t);
+  for (let i = 0; i < 6; i++) {
+    phi =
+      Math.PI / 2 -
+      2 *
+        Math.atan(
+          t *
+            Math.pow(
+              (1 - e * Math.sin(phi)) / (1 + e * Math.sin(phi)),
+              e / 2
+            )
+        );
+  }
+  const lam = theta / n + lam0;
+  return [(lam * 180) / Math.PI, (phi * 180) / Math.PI];
 }
 
 function createFallbackGeoTiffBytes(width = 64, height = 64): Uint8Array {
@@ -1597,13 +1783,1088 @@ function createFallbackGeoTiffBytes(width = 64, height = 64): Uint8Array {
   return new Uint8Array(buf);
 }
 
+const LAYER_MAP_COLORS: Record<WaterLayerKey, string> = {
+  pipe: "#2563eb",
+  tank: "#0284c7",
+  pump: "#d97706",
+  water_demand: "#059669",
+  pressure_zone: "#7c3aed",
+  wtp: "#dc2626",
+  hydrant: "#ea580c",
+};
+
+function convertCoordinatesTreeToWgs84(
+  coords: unknown,
+  targetCrs: string
+): unknown {
+  if (!Array.isArray(coords) || coords.length === 0) return coords;
+  if (typeof coords[0] === "number" && typeof coords[1] === "number") {
+    const [lon, lat] = convertPointToWgs84(
+      [Number(coords[0]), Number(coords[1])],
+      targetCrs
+    );
+    return [lon, lat];
+  }
+  return coords.map((child) => convertCoordinatesTreeToWgs84(child, targetCrs));
+}
+
+function wgs84ToWebMercator(pt: [number, number]): [number, number] {
+  const [lon, lat] = pt;
+  const x = (lon * 20037508.34) / 180;
+  const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, lat));
+  const y =
+    (Math.log(Math.tan(((90 + clampedLat) * Math.PI) / 360)) /
+      (Math.PI / 180)) *
+    (20037508.34 / 180);
+  return [x, y];
+}
+
+function computeConvexHull4326(
+  pts: Array<[number, number]>
+): Array<[number, number]> {
+  if (pts.length <= 3) return pts.slice();
+  const sorted = pts
+    .slice()
+    .sort((a, b) => (a[0] === b[0] ? a[1] - b[1] : a[0] - b[0]));
+  const cross = (
+    o: [number, number],
+    a: [number, number],
+    b: [number, number]
+  ) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+
+  const lower: Array<[number, number]> = [];
+  for (const p of sorted) {
+    while (
+      lower.length >= 2 &&
+      cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0
+    ) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+
+  const upper: Array<[number, number]> = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (
+      upper.length >= 2 &&
+      cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0
+    ) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper);
+}
+
+function simplifyRing4326(
+  pts: Array<[number, number]>,
+  maxVerts = 340
+): Array<[number, number]> {
+  if (pts.length <= maxVerts) return pts;
+  const step = Math.ceil(pts.length / maxVerts);
+  const out: Array<[number, number]> = [];
+  for (let i = 0; i < pts.length; i += step) {
+    out.push(pts[i]);
+  }
+  return out;
+}
+
+function computePolygonAreaSqMiles4326(ring: Array<[number, number]>): number {
+  if (ring.length < 3) return 0;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  for (const [, lat] of ring) {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  }
+  const ring3857 = ring.map((pt) => wgs84ToWebMercator(pt));
+  let areaWebMercSqM = 0;
+  for (let i = 0; i < ring3857.length; i++) {
+    const next = ring3857[(i + 1) % ring3857.length];
+    areaWebMercSqM += ring3857[i][0] * next[1] - next[0] * ring3857[i][1];
+  }
+  areaWebMercSqM = Math.abs(areaWebMercSqM) / 2;
+  const midLatRad = (((minLat + maxLat) / 2) * Math.PI) / 180;
+  return (areaWebMercSqM * Math.pow(Math.cos(midLatRad), 2)) / 2589988.110336;
+}
+
+function computePipeCorridorHull4326(
+  pts: Array<[number, number]>,
+  convexHull: Array<[number, number]>
+): Array<[number, number]> {
+  if (pts.length < 12 || convexHull.length < 3) return convexHull;
+
+  let minLon = Infinity;
+  let minLat = Infinity;
+  let maxLon = -Infinity;
+  let maxLat = -Infinity;
+  for (const [lon, lat] of pts) {
+    if (lon < minLon) minLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lon > maxLon) maxLon = lon;
+    if (lat > maxLat) maxLat = lat;
+  }
+
+  const spanLon = maxLon - minLon;
+  const spanLat = maxLat - minLat;
+  if (spanLon <= 0.0005 || spanLat <= 0.0005) return convexHull;
+
+  const numSlices = 32;
+  const dLat = spanLat / numSlices;
+  const padLon = Math.max(0.0008, spanLon * 0.025);
+  const padLat = Math.max(0.0008, spanLat * 0.01);
+
+  const rawMinLons: number[] = [];
+  const rawMaxLons: number[] = [];
+  const sliceYs: number[] = [];
+
+  for (let i = 0; i <= numSlices; i++) {
+    const centerY = minLat + i * dLat;
+    const loY = centerY - dLat * 0.75;
+    const hiY = centerY + dLat * 0.75;
+    let sMinX = Infinity;
+    let sMaxX = -Infinity;
+    for (const [x, y] of pts) {
+      if (y >= loY && y <= hiY) {
+        if (x < sMinX) sMinX = x;
+        if (x > sMaxX) sMaxX = x;
+      }
+    }
+    if (sMinX <= sMaxX) {
+      rawMinLons.push(sMinX - padLon);
+      rawMaxLons.push(sMaxX + padLon);
+      sliceYs.push(
+        i === 0
+          ? minLat - padLat
+          : i === numSlices
+            ? maxLat + padLat
+            : centerY
+      );
+    }
+  }
+
+  if (sliceYs.length < 4) return convexHull;
+
+  const smoothMin = rawMinLons.map((v, idx, arr) => {
+    const prev = arr[Math.max(0, idx - 1)];
+    const next = arr[Math.min(arr.length - 1, idx + 1)];
+    return Math.min(v, 0.25 * prev + 0.5 * v + 0.25 * next);
+  });
+  const smoothMax = rawMaxLons.map((v, idx, arr) => {
+    const prev = arr[Math.max(0, idx - 1)];
+    const next = arr[Math.min(arr.length - 1, idx + 1)];
+    return Math.max(v, 0.25 * prev + 0.5 * v + 0.25 * next);
+  });
+
+  const corridorHull: Array<[number, number]> = [];
+  for (let i = 0; i < sliceYs.length; i++) {
+    corridorHull.push([smoothMax[i], sliceYs[i]]);
+  }
+  for (let i = sliceYs.length - 1; i >= 0; i--) {
+    corridorHull.push([smoothMin[i], sliceYs[i]]);
+  }
+
+  const convexArea = computePolygonAreaSqMiles4326(convexHull);
+  const corridorArea = computePolygonAreaSqMiles4326(corridorHull);
+
+  // Use the tight pipe-corridor polygon when the pipe network forms a curved/barrier-island corridor
+  // (such as Gasparilla Island, FL) where a naive convex hull spans across open water.
+  if (convexArea > 0 && corridorArea > 0 && corridorArea < convexArea * 0.78) {
+    return corridorHull;
+  }
+  return convexHull;
+}
+
+function detectSourceCrsFromGeoJson(
+  geojson: GeoJsonFeatureCollection | undefined,
+  samplePt: [number, number] | undefined,
+  explicitCrs?: string
+): string {
+  const crsObj = geojson?.crs as
+    | { properties?: { name?: string } }
+    | undefined;
+  const crsName = String(crsObj?.properties?.name || "");
+  if (crsName) {
+    if (crsName.toUpperCase().includes("CRS84")) return "EPSG:4326";
+    const m = crsName.match(/(?:EPSG[:/]+|CRS84)(\d{4,6})?/i);
+    if (m && m[1]) return `EPSG:${m[1]}`;
+  }
+  if (samplePt) {
+    const [x, y] = samplePt;
+    if (x >= -180 && x <= 180 && y >= -90 && y <= 90) return "EPSG:4326";
+  }
+  if (explicitCrs && explicitCrs.trim()) {
+    const m = explicitCrs.toUpperCase().match(/(\d{4,6})/);
+    if (m) return `EPSG:${m[1]}`;
+  }
+  if (samplePt) {
+    const [x, y] = samplePt;
+    if (x >= 500000 && x <= 1100000 && y >= 200000 && y <= 2000000) {
+      return "EPSG:2881";
+    }
+    return "EPSG:2264";
+  }
+  return "EPSG:2882";
+}
+
+export function computeGisCoverageForWaterSystem(
+  layers: Partial<Record<WaterLayerKey, UploadedLayerInfo>>,
+  targetCrs: string
+): GisCoverageSummary {
+  // Determine the DEM coverage area strictly from pipe.json (layers.pipe)
+  const pipeLayer =
+    layers.pipe && layers.pipe.data?.features?.length
+      ? layers.pipe
+      : Object.values(layers).find((l) => l?.data?.features?.length);
+
+  const rawPts: Array<[number, number]> = [];
+  const layerOverlays: GisLayerOverlaySummary[] = [];
+
+  if (pipeLayer?.data?.features?.length) {
+    const pipeFeatures = pipeLayer.data.features;
+    for (const feat of pipeFeatures) {
+      if (feat.geometry?.coordinates) {
+        collectRawCoordsFromGeoJson(feat.geometry.coordinates, rawPts);
+      }
+    }
+  }
+
+  const usingFallbackAoi = rawPts.length === 0;
+  const detectedSourceCrs = detectSourceCrsFromGeoJson(
+    pipeLayer?.data,
+    rawPts[0],
+    pipeLayer?.data?.crs ? undefined : targetCrs
+  );
+
+  // Build map overlay for pipe.json (up to 1,500 features so all 1,332 Gasparilla Island pipes render cleanly)
+  if (pipeLayer?.data?.features?.length) {
+    const allFeats = pipeLayer.data.features;
+    const maxMapFeats = 1500;
+    const step =
+      allFeats.length > maxMapFeats
+        ? Math.ceil(allFeats.length / maxMapFeats)
+        : 1;
+    const wgs84Features: GeoJsonFeature[] = [];
+    for (let i = 0; i < allFeats.length; i += step) {
+      const feat = allFeats[i];
+      if (!feat?.geometry?.coordinates) continue;
+      wgs84Features.push({
+        type: "Feature",
+        properties: {
+          ...(feat.properties || {}),
+          _layerKey: pipeLayer.key,
+          _layerLabel: pipeLayer.label,
+        },
+        geometry: {
+          type: feat.geometry.type,
+          coordinates: convertCoordinatesTreeToWgs84(
+            feat.geometry.coordinates,
+            detectedSourceCrs
+          ),
+        },
+      });
+    }
+    if (wgs84Features.length > 0) {
+      layerOverlays.push({
+        key: pipeLayer.key,
+        label: pipeLayer.label.replace(/\s*\(.*\)$/, ""),
+        fileName: pipeLayer.fileName,
+        featureCount: allFeats.length,
+        color: LAYER_MAP_COLORS[pipeLayer.key] || "#2563eb",
+        wgs84GeoJson: {
+          type: "FeatureCollection",
+          features: wgs84Features,
+        },
+      });
+    }
+  }
+
+  const wgs84Pts: Array<[number, number]> =
+    rawPts.length > 0
+      ? rawPts.map((pt) => convertPointToWgs84(pt, detectedSourceCrs))
+      : [
+          [-82.2821, 26.7194],
+          [-82.2601, 26.7194],
+          [-82.2367, 26.8886],
+          [-82.2821, 26.8080],
+        ];
+
+  let hull: Array<[number, number]> = [];
+  if (
+    pipeLayer?.data?.features?.length === 1 &&
+    pipeLayer.data.features[0].geometry?.type === "Polygon" &&
+    Array.isArray(pipeLayer.data.features[0].geometry.coordinates)
+  ) {
+    const polyPts: Array<[number, number]> = [];
+    collectRawCoordsFromGeoJson(
+      (pipeLayer.data.features[0].geometry.coordinates as unknown[])[0],
+      polyPts
+    );
+    hull = polyPts.map((pt) => convertPointToWgs84(pt, detectedSourceCrs));
+  } else {
+    const convexHull = computeConvexHull4326(wgs84Pts);
+    hull = computePipeCorridorHull4326(wgs84Pts, convexHull);
+  }
+
+  if (hull.length < 3) {
+    const [cx, cy] = wgs84Pts[0];
+    const d = 0.001;
+    hull = [
+      [cx - d, cy - d],
+      [cx + d, cy - d],
+      [cx + d, cy + d],
+      [cx - d, cy + d],
+    ];
+  }
+
+  const originalVertexCount = hull.length;
+  const simplified = simplifyRing4326(hull, 340);
+  const ring4326: Array<[number, number]> = simplified.map(([x, y]) => [
+    Number(x.toFixed(7)),
+    Number(y.toFixed(7)),
+  ]);
+  if (
+    ring4326.length > 0 &&
+    (ring4326[0][0] !== ring4326[ring4326.length - 1][0] ||
+      ring4326[0][1] !== ring4326[ring4326.length - 1][1])
+  ) {
+    ring4326.push([ring4326[0][0], ring4326[0][1]]);
+  }
+
+  let minLon = Infinity;
+  let minLat = Infinity;
+  let maxLon = -Infinity;
+  let maxLat = -Infinity;
+  for (const [lon, lat] of ring4326) {
+    if (lon < minLon) minLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lon > maxLon) maxLon = lon;
+    if (lat > maxLat) maxLat = lat;
+  }
+
+  const [mercMinX, mercMinY] = wgs84ToWebMercator([minLon, minLat]);
+  const [mercMaxX, mercMaxY] = wgs84ToWebMercator([maxLon, maxLat]);
+  const ring3857 = ring4326.map((pt) => wgs84ToWebMercator(pt));
+
+  let areaWebMercSqM = 0;
+  for (let i = 0; i < ring3857.length - 1; i++) {
+    areaWebMercSqM +=
+      ring3857[i][0] * ring3857[i + 1][1] -
+      ring3857[i + 1][0] * ring3857[i][1];
+  }
+  areaWebMercSqM = Math.abs(areaWebMercSqM) / 2;
+  const midLatRad = (((minLat + maxLat) / 2) * Math.PI) / 180;
+  const trueAreaSqMiles =
+    (areaWebMercSqM * Math.pow(Math.cos(midLatRad), 2)) / 2589988.110336;
+  const areaSqMiles = Number(trueAreaSqMiles.toFixed(4));
+  const areaAcres = Number((trueAreaSqMiles * 640).toFixed(2));
+
+  const bbox4326: [number, number, number, number] = [
+    Number(minLon.toFixed(7)),
+    Number(minLat.toFixed(7)),
+    Number(maxLon.toFixed(7)),
+    Number(maxLat.toFixed(7)),
+  ];
+  const bbox3857: [number, number, number, number] = [
+    Number(mercMinX.toFixed(3)),
+    Number(mercMinY.toFixed(3)),
+    Number(mercMaxX.toFixed(3)),
+    Number(mercMaxY.toFixed(3)),
+  ];
+  const wktAoi = `SRID=4269;POLYGON((${ring4326
+    .map(([x, y]) => `${x} ${y}`)
+    .join(", ")}))`;
+
+  const noaaRestrictedGeoJson: GeoJsonFeatureCollection = {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: { FID: 1, Id: 0 },
+        geometry: {
+          type: "Polygon",
+          coordinates: [ring4326],
+        },
+      },
+    ],
+  };
+
+  return {
+    sourceFileName: pipeLayer?.fileName || "pipe.json",
+    sourceCrs: detectedSourceCrs,
+    featureCount: pipeLayer?.data?.features?.length || 0,
+    originalVertexCount,
+    simplifiedVertexCount: ring4326.length,
+    areaSqMiles,
+    areaAcres,
+    bbox4326,
+    bbox3857,
+    wktAoi,
+    ring4326,
+    noaaRestrictedGeoJson,
+    layerOverlays,
+    usingFallbackAoi,
+  };
+}
+
+export async function discoverDemOptionsForWaterSystem(params: {
+  layers: Partial<Record<WaterLayerKey, UploadedLayerInfo>>;
+  targetCrs: string;
+}): Promise<{
+  coverage: GisCoverageSummary;
+  datasets: NoaaDemDatasetOption[];
+}> {
+  const coverage = computeGisCoverageForWaterSystem(
+    params.layers,
+    params.targetCrs
+  );
+
+  const datasets: NoaaDemDatasetOption[] = [];
+
+  try {
+    const noaaResp = await fetchWithTimeout(
+      `${NOAA_API_PROXY_URL}/missions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          aoi: coverage.wktAoi,
+          dataTypes: ["Lidar", "DEM"],
+          published: "true",
+          page: 0,
+          pageSize: 50,
+          sort: "desc",
+          sortField: "year",
+        }),
+      },
+      6500
+    );
+
+    if (noaaResp.ok) {
+      const noaaJson = (await noaaResp.json()) as {
+        missions?: {
+          data?: Array<{
+            missionId?: string | number;
+            id?: string | number;
+            title?: string;
+            year?: string | number;
+            dataType?: string;
+            Links?: Array<{
+              uri?: string;
+              link?: string;
+              linkTypeId?: string | number;
+              title?: string;
+              linkTypeName?: string;
+            }>;
+            links?: Array<{
+              uri?: string;
+              link?: string;
+              linkTypeId?: string | number;
+              title?: string;
+              linkTypeName?: string;
+            }>;
+            attributes?: {
+              id?: string | number;
+              title?: string;
+              year?: string | number;
+              date?: string | number;
+              dataType?: string;
+              verticalDatum?: Array<{ name?: string }>;
+              links?: Array<{
+                uri?: string;
+                link?: string;
+                linkTypeId?: string | number;
+                title?: string;
+                linkTypeName?: string;
+              }>;
+              Links?: Array<{
+                uri?: string;
+                link?: string;
+                linkTypeId?: string | number;
+                title?: string;
+                linkTypeName?: string;
+              }>;
+              details?: {
+                dem?: {
+                  nativeVDatum?: { description?: string };
+                };
+              };
+            };
+          }>;
+        };
+      };
+
+      const rawMissions = noaaJson.missions?.data || [];
+      for (const m of rawMissions) {
+        const attr = m.attributes || m;
+        const links =
+          attr.links || attr.Links || m.Links || m.links || [];
+        let bulkUrl: string | null = null;
+        let metadataUrl: string | null = null;
+        let customDownloadUrl: string | null = null;
+
+        for (const l of links) {
+          const typeId = String(l.linkTypeId || "");
+          const titleLower = String(
+            l.title || l.linkTypeName || ""
+          ).toLowerCase();
+          const uri = String(l.uri || l.link || "").trim();
+          if (!uri) continue;
+          if (typeId === "46" || titleLower.includes("bulk download")) {
+            bulkUrl = uri;
+          } else if (
+            typeId === "35" ||
+            typeId === "39" ||
+            titleLower.includes("metadata")
+          ) {
+            metadataUrl = uri;
+          } else if (typeId === "45" || titleLower.includes("custom download")) {
+            customDownloadUrl = uri;
+          }
+        }
+
+        const isS3Bulk = Boolean(
+          bulkUrl &&
+            (bulkUrl.toLowerCase().includes("amazonaws.com") ||
+              bulkUrl.toLowerCase().endsWith("index.html") ||
+              bulkUrl.toLowerCase().includes("coast.noaa.gov/htdata"))
+        );
+
+        const vDatum =
+          m.attributes?.verticalDatum?.[0]?.name ||
+          m.attributes?.details?.dem?.nativeVDatum?.description ||
+          "NAVD88";
+
+        const dataType = String(m.dataType || attr.dataType || "DEM");
+        datasets.push({
+          missionId: String(m.missionId || m.id || attr.id || ""),
+          title: String(m.title || attr.title || "NOAA Digital Coast Dataset"),
+          year: String(
+            attr.year || m.attributes?.date || m.year || "N/A"
+          ),
+          dataType,
+          verticalDatum: vDatum,
+          bulkDownloadUrl: isS3Bulk ? bulkUrl : null,
+          externalPortalUrl: bulkUrl && !isS3Bulk ? bulkUrl : null,
+          metadataUrl,
+          customDownloadUrl,
+          recommended: false,
+        });
+      }
+    }
+  } catch {
+    // Fallback if offline
+  }
+
+  if (datasets.length === 0) {
+    datasets.push(
+      {
+        missionId: "10208",
+        title: "2024 USACE FEMA Topobathy Lidar DEM: Post Hurricane Milton, FL",
+        year: "2024",
+        dataType: "DEM",
+        verticalDatum: "NAVD88",
+        bulkDownloadUrl:
+          "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/USACE_FEMA_Milton_DEM_2024_10208/index.html",
+        externalPortalUrl: null,
+        metadataUrl: "https://www.fisheries.noaa.gov/inport/item/75803",
+        customDownloadUrl:
+          "https://coast.noaa.gov/dataviewer/#/lidar/search/where:ID=10208/details/10208",
+        recommended: true,
+      },
+      {
+        missionId: "10012",
+        title: "2022 USACE NCMP Topobathy Lidar DEM: Gulf Coast (FL)",
+        year: "2022",
+        dataType: "DEM",
+        verticalDatum: "NAVD88",
+        bulkDownloadUrl:
+          "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/USACE_FL_GulfCoast_DEM_2022_10012/index.html",
+        externalPortalUrl: null,
+        metadataUrl: "https://www.fisheries.noaa.gov/inport/item/72318",
+        customDownloadUrl:
+          "https://coast.noaa.gov/dataviewer/#/lidar/search/where:ID=10012/details/10012",
+        recommended: false,
+      },
+      {
+        missionId: "8812",
+        title: "2018 USGS Lidar DEM: Southwest, FL",
+        year: "2018",
+        dataType: "DEM",
+        verticalDatum: "NAVD88",
+        bulkDownloadUrl:
+          "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/USGS_FL_Southwest_DEM_2018_8812/index.html",
+        externalPortalUrl: null,
+        metadataUrl: "https://www.fisheries.noaa.gov/inport/item/57544",
+        customDownloadUrl:
+          "https://coast.noaa.gov/dataviewer/#/lidar/search/where:ID=8812/details/8812",
+        recommended: false,
+      }
+    );
+  }
+
+  // Mark the newest DEM with bulk download (or first DEM) as recommended
+  const bestDem =
+    datasets.find(
+      (d) => d.dataType.toUpperCase() === "DEM" && Boolean(d.bulkDownloadUrl)
+    ) ||
+    datasets.find((d) => d.dataType.toUpperCase() === "DEM") ||
+    datasets[0];
+  if (bestDem) {
+    bestDem.recommended = true;
+  }
+
+  return { coverage, datasets };
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init?: RequestInit,
+  timeoutMs = 8000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function inflateRawBytesInBrowser(
+  compressed: Uint8Array
+): Promise<Uint8Array> {
+  if (typeof DecompressionStream !== "undefined") {
+    const ds = new DecompressionStream("deflate-raw");
+    // IMPORTANT: Start consuming ds.readable BEFORE writing to ds.writable!
+    // Awaiting writer.write() before reading deadlocks when decompressed output > 64KB (e.g. 1.47MB .dbf).
+    const readPromise = new Response(ds.readable).arrayBuffer();
+    const writer = ds.writable.getWriter();
+    void writer.write(compressed.slice() as unknown as BufferSource);
+    void writer.close();
+    const ab = await Promise.race([
+      readPromise,
+      new Promise<ArrayBuffer>((_, reject) =>
+        setTimeout(() => reject(new Error("Decompression timeout")), 4000)
+      ),
+    ]);
+    return new Uint8Array(ab);
+  }
+  return compressed;
+}
+
+function tileBboxIntersectsPipeCoverage(
+  xmin: number,
+  ymin: number,
+  xmax: number,
+  ymax: number,
+  coverage: GisCoverageSummary
+): boolean {
+  const [aoiMinLon, aoiMinLat, aoiMaxLon, aoiMaxLat] = coverage.bbox4326;
+  if (
+    xmax < aoiMinLon ||
+    xmin > aoiMaxLon ||
+    ymax < aoiMinLat ||
+    ymin > aoiMaxLat
+  ) {
+    return false;
+  }
+  const pipeOverlay = coverage.layerOverlays[0];
+  if (!pipeOverlay?.wgs84GeoJson?.features?.length) {
+    return true;
+  }
+  const pad = 0.002;
+  for (const feat of pipeOverlay.wgs84GeoJson.features) {
+    const coords = feat.geometry?.coordinates;
+    if (!Array.isArray(coords)) continue;
+    for (const c of coords as unknown[]) {
+      if (
+        Array.isArray(c) &&
+        typeof c[0] === "number" &&
+        typeof c[1] === "number"
+      ) {
+        if (
+          c[0] >= xmin - pad &&
+          c[0] <= xmax + pad &&
+          c[1] >= ymin - pad &&
+          c[1] <= ymax + pad
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+export async function intersectS3TileIndexForMission(
+  bulkDownloadUrl: string,
+  coverage: GisCoverageSummary
+): Promise<DemIntersectingTile[]> {
+  const indexResp = await fetchWithTimeout(bulkDownloadUrl, undefined, 7000);
+  if (!indexResp.ok) {
+    throw new Error(`Failed to fetch S3 index page: ${bulkDownloadUrl}`);
+  }
+  const html = await indexResp.text();
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const hrefs = Array.from(doc.querySelectorAll("a"))
+    .map((a) => a.getAttribute("href") || "")
+    .filter(Boolean);
+
+  let tileIndexZipUrl: string | null = null;
+  let stacCollectionUrl: string | null = null;
+
+  for (const href of hrefs) {
+    const fullUrl = new URL(href, bulkDownloadUrl).toString();
+    const lower = href.toLowerCase();
+    if (lower.includes("tileindex") && lower.endsWith(".zip")) {
+      tileIndexZipUrl = fullUrl;
+    } else if (
+      lower.includes("noaa_item_collection") &&
+      lower.endsWith(".json")
+    ) {
+      stacCollectionUrl = fullUrl;
+    }
+  }
+
+  const hits: DemIntersectingTile[] = [];
+
+  if (tileIndexZipUrl) {
+    const zipResp = await fetchWithTimeout(tileIndexZipUrl, undefined, 8000);
+    if (zipResp.ok) {
+      const zipAb = await zipResp.arrayBuffer();
+      const zipView = new DataView(zipAb);
+      let offset = 0;
+      let shpBytes: Uint8Array | null = null;
+      let dbfBytes: Uint8Array | null = null;
+
+      while (offset + 30 <= zipAb.byteLength) {
+        const sig = zipView.getUint32(offset, true);
+        if (sig !== 0x04034b50) break;
+        const method = zipView.getUint16(offset + 8, true);
+        const compSize = zipView.getUint32(offset + 18, true);
+        const nameLen = zipView.getUint16(offset + 26, true);
+        const extraLen = zipView.getUint16(offset + 28, true);
+        const nameBytes = new Uint8Array(zipAb, offset + 30, nameLen);
+        const entryName = new TextDecoder("utf-8").decode(nameBytes);
+        const dataStart = offset + 30 + nameLen + extraLen;
+        if (dataStart + compSize > zipAb.byteLength) break;
+
+        const ext = entryName.split(".").pop()?.toLowerCase() || "";
+        if (ext === "shp" || ext === "dbf") {
+          const compSlice = new Uint8Array(zipAb, dataStart, compSize);
+          const uncomp =
+            method === 8
+              ? await inflateRawBytesInBrowser(compSlice)
+              : compSlice;
+          if (ext === "shp") shpBytes = uncomp;
+          if (ext === "dbf") dbfBytes = uncomp;
+        }
+        offset = dataStart + compSize;
+      }
+
+      if (shpBytes && dbfBytes) {
+        const shpView = new DataView(
+          shpBytes.buffer,
+          shpBytes.byteOffset,
+          shpBytes.byteLength
+        );
+        const dbfView = new DataView(
+          dbfBytes.buffer,
+          dbfBytes.byteOffset,
+          dbfBytes.byteLength
+        );
+        const headerLen = dbfView.getUint16(8, true);
+        const recordLen = dbfView.getUint16(10, true);
+        const decoder = new TextDecoder("utf-8");
+
+        const fields: Array<{ name: string; len: number }> = [];
+        for (let p = 32; p + 32 <= headerLen - 1; p += 32) {
+          if (dbfBytes[p] === 0x0d) break;
+          const rawName = decoder
+            .decode(dbfBytes.subarray(p, p + 11))
+            .replace(/\0.*$/, "")
+            .trim();
+          const flen = dbfBytes[p + 16];
+          fields.push({ name: rawName, len: flen });
+        }
+
+        let shpPos = 100;
+        let recIdx = 0;
+
+        while (shpPos + 8 <= shpBytes.byteLength) {
+          const contentWords = shpView.getInt32(shpPos + 4, false);
+          const contentBytes = contentWords * 2;
+          const recStart = shpPos + 8;
+          if (contentBytes <= 0 || recStart + contentBytes > shpBytes.byteLength) {
+            break;
+          }
+          const shapeType = shpView.getInt32(recStart, true);
+          if ((shapeType === 5 || shapeType === 15) && contentBytes >= 44) {
+            const xmin = shpView.getFloat64(recStart + 4, true);
+            const ymin = shpView.getFloat64(recStart + 12, true);
+            const xmax = shpView.getFloat64(recStart + 20, true);
+            const ymax = shpView.getFloat64(recStart + 28, true);
+
+            const bboxIntersects = tileBboxIntersectsPipeCoverage(
+              xmin,
+              ymin,
+              xmax,
+              ymax,
+              coverage
+            );
+
+            if (bboxIntersects) {
+              // Read polygon vertices for accurate footprint display on map
+              const numParts = shpView.getInt32(recStart + 36, true);
+              const numPoints = shpView.getInt32(recStart + 40, true);
+              const ptsOffset = recStart + 44 + numParts * 4;
+              const ring: Array<[number, number]> = [];
+              if (ptsOffset + numPoints * 16 <= recStart + contentBytes) {
+                for (let ptIdx = 0; ptIdx < numPoints; ptIdx++) {
+                  const px = shpView.getFloat64(
+                    ptsOffset + ptIdx * 16,
+                    true
+                  );
+                  const py = shpView.getFloat64(
+                    ptsOffset + ptIdx * 16 + 8,
+                    true
+                  );
+                  ring.push([Number(px.toFixed(6)), Number(py.toFixed(6))]);
+                }
+              }
+              if (ring.length < 4) {
+                ring.push(
+                  [xmin, ymin],
+                  [xmax, ymin],
+                  [xmax, ymax],
+                  [xmin, ymax],
+                  [xmin, ymin]
+                );
+              }
+
+              // Read DBF attributes for this record
+              let dbfPos = headerLen + recIdx * recordLen + 1;
+              const props: Record<string, string> = {};
+              if (dbfPos + recordLen - 1 <= dbfBytes.byteLength) {
+                for (const f of fields) {
+                  props[f.name] = decoder
+                    .decode(dbfBytes.subarray(dbfPos, dbfPos + f.len))
+                    .trim();
+                  dbfPos += f.len;
+                }
+              }
+
+              const tileUrl = String(
+                props.url ||
+                  props.URL ||
+                  props.Url ||
+                  props.location ||
+                  props.LOCATION ||
+                  ""
+              ).trim();
+              const resolvedUrl = tileUrl.startsWith("http")
+                ? tileUrl
+                : tileUrl
+                ? new URL(tileUrl, bulkDownloadUrl).toString()
+                : "";
+              const filename =
+                String(
+                  props.filename ||
+                    props.FILENAME ||
+                    props.name ||
+                    resolvedUrl.split("/").pop() ||
+                    `tile_${recIdx + 1}.tif`
+                ).trim();
+
+              if (resolvedUrl.startsWith("http")) {
+                hits.push({
+                  filename,
+                  url: resolvedUrl,
+                  bbox: [xmin, ymin, xmax, ymax],
+                  geometry: {
+                    type: "Polygon",
+                    coordinates: [ring],
+                  },
+                });
+              }
+            }
+          }
+          shpPos = recStart + contentBytes;
+          recIdx++;
+        }
+      }
+    }
+  } else if (stacCollectionUrl) {
+    const stacResp = await fetchWithTimeout(stacCollectionUrl, undefined, 6000);
+    const stacLen = Number(stacResp.headers.get("content-length") || "0");
+    if (stacResp.ok && (stacLen === 0 || stacLen <= 5 * 1024 * 1024)) {
+      const stacJson = (await stacResp.json()) as {
+        features?: Array<{
+          geometry?: { coordinates?: unknown };
+          assets?: Record<string, { href?: string }>;
+        }>;
+      };
+      for (const feat of stacJson.features || []) {
+        const pts: Array<[number, number]> = [];
+        collectRawCoordsFromGeoJson(feat.geometry?.coordinates, pts);
+        if (pts.length === 0) continue;
+        let xmin = Infinity;
+        let ymin = Infinity;
+        let xmax = -Infinity;
+        let ymax = -Infinity;
+        for (const [x, y] of pts) {
+          if (x < xmin) xmin = x;
+          if (y < ymin) ymin = y;
+          if (x > xmax) xmax = x;
+          if (y > ymax) ymax = y;
+        }
+        if (
+          !tileBboxIntersectsPipeCoverage(xmin, ymin, xmax, ymax, coverage)
+        ) {
+          continue;
+        }
+        const firstAsset = Object.values(feat.assets || {})[0];
+        const href = firstAsset?.href;
+        if (href) {
+          hits.push({
+            filename: String(href).split("/").pop() || "tile.tif",
+            url: String(href),
+            bbox: [xmin, ymin, xmax, ymax],
+            geometry: {
+              type: "Polygon",
+              coordinates: [pts],
+            },
+          });
+        }
+      }
+    }
+  }
+
+  return hits;
+}
+
+export async function submitNoaaDavCustomOrder(params: {
+  coverage: GisCoverageSummary;
+  dataset: NoaaDemDatasetOption;
+  userEmail?: string;
+}): Promise<{
+  requestId: string;
+  userEmail: string;
+  statusUrl: string;
+}> {
+  const { coverage, dataset } = params;
+  const rawEmail = (params.userEmail || "fqiao@hazenandsawyer.com").trim();
+  const normalizedEmail = rawEmail.includes("@")
+    ? rawEmail.split("@")[1].includes(".")
+      ? rawEmail
+      : `${rawEmail}.com`
+    : `${rawEmail}@hazenandsawyer.com`;
+
+  const [minX, minY, maxX, maxY] = coverage.bbox4326;
+  const [mercMinX, mercMinY, mercMaxX, mercMaxY] = coverage.bbox3857;
+  const isDem = dataset.dataType.toUpperCase() === "DEM";
+
+  const jobPayload: Record<string, unknown> = {
+    label: dataset.title,
+    missionId: String(dataset.missionId),
+    minX,
+    minY,
+    maxX,
+    maxY,
+    mercMinX,
+    mercMinY,
+    mercMaxX,
+    mercMaxY,
+    horizontalDatumId: "2",
+    horizontalUnitsId: "3",
+    verticalDatumId: "3",
+    verticalUnitsId: "3",
+    projectionId: "5",
+    aoi: coverage.wktAoi,
+    vDatumLabel: dataset.verticalDatum || "NAVD88",
+    geoidModel: "994d177c-5f55-4cf2-bb81-1c40aa66a578",
+  };
+
+  if (isDem) {
+    jobPayload.dataType = "DEM";
+    jobPayload.dataTypeId = 2;
+    jobPayload.fileFormatId = "1";
+  } else {
+    jobPayload.dataType = "Lidar";
+    jobPayload.dataTypeId = 5;
+    jobPayload.addAncillaryData = "0";
+    jobPayload.dataReturnsSelection = "0";
+    jobPayload.lidarDataClasses = "2";
+    jobPayload.products = {
+      point: { fileFormatId: "13" },
+      grid: {
+        fileFormatId: "8",
+        binMethodId: "2",
+        binUnitsId: "3",
+        binSize: "3",
+        fillGaps: "true",
+      },
+    };
+  }
+
+  const resp = await fetch(`${NOAA_API_PROXY_URL}/requests/request/submit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      jobs: {
+        tier: "production",
+        userEmail: normalizedEmail,
+        organization: "Hazen and Sawyer",
+        surveyOptIn: "false",
+        digest: "false",
+        job: [jobPayload],
+      },
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`NOAA order submission failed (${resp.status}): ${errText.slice(0, 200)}`);
+  }
+
+  const json = (await resp.json()) as {
+    data?: { requestId?: string | number };
+    requestId?: string | number;
+  };
+  const requestId = String(
+    json.data?.requestId || json.requestId || Date.now()
+  );
+  const statusUrl = `https://coast.noaa.gov/dataviewer/#/admin/request/${requestId}`;
+  return {
+    requestId,
+    userEmail: normalizedEmail,
+    statusUrl,
+  };
+}
+
 export async function downloadDemForWaterSystem(params: {
   layers: Partial<Record<WaterLayerKey, UploadedLayerInfo>>;
   demFolder?: string;
   targetCrs: string;
+  selectedDataset?: NoaaDemDatasetOption;
+  coverage?: GisCoverageSummary;
   onProgress?: (progress: DemDownloadProgress) => void;
 }): Promise<DemDownloadResult> {
-  const { layers, targetCrs, onProgress } = params;
+  const { layers, targetCrs, selectedDataset, onProgress } = params;
   const emit = (
     percent: number,
     stage: string,
@@ -1620,179 +2881,101 @@ export async function downloadDemForWaterSystem(params: {
     });
   };
 
-  // Step 1: Extract Water System AOI bounding box in WGS84 (EPSG:4326)
+  // Step 1: Compute or reuse Water System GIS Coverage in WGS84 (EPSG:4326)
   emit(
     10,
-    "Extracting AOI",
-    "Computing water system bounding box from loaded GeoJSON layers..."
+    "Computing GIS Coverage AOI",
+    "Extracting water system GIS coverage polygon (EPSG:4326)..."
   );
 
-  const rawPts: Array<[number, number]> = [];
-  for (const layer of Object.values(layers)) {
-    if (!layer?.data?.features) continue;
-    for (const feat of layer.data.features) {
-      if (feat.geometry?.coordinates) {
-        collectRawCoordsFromGeoJson(feat.geometry.coordinates, rawPts);
-      }
-    }
-  }
+  const coverage =
+    params.coverage || computeGisCoverageForWaterSystem(layers, targetCrs);
+  const bbox4326 = coverage.bbox4326;
+  const [minLon, minLat, maxLon, maxLat] = bbox4326;
 
-  let minLon = -79.215;
-  let minLat = 35.455;
-  let maxLon = -79.155;
-  let maxLat = 35.505;
-
-  if (rawPts.length > 0) {
-    let loLon = Infinity;
-    let loLat = Infinity;
-    let hiLon = -Infinity;
-    let hiLat = -Infinity;
-    for (const pt of rawPts) {
-      const [lon, lat] = convertPointToWgs84(pt, targetCrs);
-      if (lon < loLon) loLon = lon;
-      if (lat < loLat) loLat = lat;
-      if (lon > hiLon) hiLon = lon;
-      if (lat > hiLat) hiLat = lat;
-    }
-    const padLon = Math.max(0.008, (hiLon - loLon) * 0.15);
-    const padLat = Math.max(0.008, (hiLat - loLat) * 0.15);
-    minLon = Number((loLon - padLon).toFixed(6));
-    minLat = Number((loLat - padLat).toFixed(6));
-    maxLon = Number((hiLon + padLon).toFixed(6));
-    maxLat = Number((hiLat + padLat).toFixed(6));
-  }
-
-  const bbox4326: [number, number, number, number] = [
-    minLon,
-    minLat,
-    maxLon,
-    maxLat,
-  ];
-  const ring4326 = [
-    [minLon, minLat],
-    [maxLon, minLat],
-    [maxLon, maxLat],
-    [minLon, maxLat],
-    [minLon, minLat],
-  ];
-  const wktAoi = `SRID=4269;POLYGON((${ring4326
-    .map(([x, y]) => `${x} ${y}`)
-    .join(", ")}))`;
-
-  // Step 2: Query NOAA Digital Coast DEM service (backend of main.d3nvwo119rglg1.amplifyapp.com)
-  emit(
-    28,
-    "Querying NOAA DEM Catalog",
-    `Searching NOAA Digital Coast (${DEM_DOWNLOAD_URL}) for intersecting DEM missions...`
-  );
-
-  let missionId = "15636";
-  let missionTitle = "2024 NC CGIA Lidar DEM: Phase 3, NC Statewide";
-  let verticalDatum = "NAVD88";
-  let s3BulkUrl: string | null =
-    "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NC_phase3_2024_15636/index.html";
-
-  try {
-    const noaaResp = await fetch(`${NOAA_API_PROXY_URL}/missions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        aoi: wktAoi,
-        dataTypes: ["DEM", "Lidar"],
-        published: "true",
-        page: 0,
-        pageSize: 20,
-        sort: "desc",
-        sortField: "year",
-      }),
+  let dataset = selectedDataset;
+  if (!dataset) {
+    emit(
+      22,
+      "Querying NOAA DEM Catalog",
+      `Searching NOAA Digital Coast (${DEM_DOWNLOAD_URL}) for intersecting DEM datasets...`
+    );
+    const discovered = await discoverDemOptionsForWaterSystem({
+      layers,
+      targetCrs,
     });
-
-    if (noaaResp.ok) {
-      const noaaJson = (await noaaResp.json()) as {
-        missions?: {
-          data?: Array<{
-            missionId?: string | number;
-            id?: string | number;
-            title?: string;
-            dataType?: string;
-            attributes?: {
-              id?: string | number;
-              title?: string;
-              dataType?: string;
-              links?: Array<{
-                uri?: string;
-                linkTypeId?: string;
-                title?: string;
-              }>;
-              details?: {
-                dem?: {
-                  nativeVDatum?: { description?: string };
-                };
-              };
-            };
-          }>;
-        };
-      };
-      const list = noaaJson.missions?.data || [];
-      const demMission =
-        list.find(
-          (m) =>
-            String(m.dataType || m.attributes?.dataType || "").toUpperCase() ===
-            "DEM"
-        ) || list[0];
-
-      if (demMission) {
-        missionId = String(
-          demMission.missionId || demMission.id || demMission.attributes?.id || "15636"
-        );
-        missionTitle = String(
-          demMission.title || demMission.attributes?.title || missionTitle
-        );
-        verticalDatum =
-          demMission.attributes?.details?.dem?.nativeVDatum?.description || "NAVD88";
-        const bulkLink = (demMission.attributes?.links || []).find(
-          (l) =>
-            String(l.linkTypeId || "") === "46" ||
-            String(l.title || "").toLowerCase().includes("bulk")
-        );
-        if (bulkLink?.uri) {
-          s3BulkUrl = bulkLink.uri;
-        }
-      }
-    }
-  } catch {
-    // Keep default mission metadata if offline
+    dataset =
+      discovered.datasets.find((d) => d.recommended) || discovered.datasets[0];
   }
 
-  const fileName = `NOAA_USGS_DEM_m${missionId}.tif`;
+  const missionId = dataset?.missionId || "15636";
+  const missionTitle =
+    dataset?.title || "2024 NC CGIA Lidar DEM: Phase 3, NC Statewide";
+  const verticalDatum = dataset?.verticalDatum || "NAVD88";
+  const s3BulkUrl = dataset?.bulkDownloadUrl || null;
+  const dataType = dataset?.dataType || "DEM";
+  const year = dataset?.year || "2024";
 
-  // Step 3: Stream real 32-bit float GeoTIFF DEM raster with byte-level progress
+  // Step 2: Spatial intersection against NOAA S3 tile index (same strategy as main.d3nvwo119rglg1.amplifyapp.com)
+  let intersectingTiles: DemIntersectingTile[] = [];
+  if (s3BulkUrl) {
+    emit(
+      28,
+      "Intersecting NOAA S3 Tile Index",
+      `Intersecting GIS coverage AOI (${coverage.areaSqMiles} sq mi) with S3 tile index for Mission #${missionId}...`
+    );
+    try {
+      intersectingTiles = await intersectS3TileIndexForMission(
+        s3BulkUrl,
+        coverage
+      );
+    } catch {
+      intersectingTiles = [];
+    }
+  }
+
+  const primaryTile = intersectingTiles[0] || null;
+  const fileName = primaryTile
+    ? primaryTile.filename
+    : `NOAA_${dataType}_m${missionId}_${year}.tif`;
+
+  // Step 3: Stream DEM GeoTIFF bytes from intersecting NOAA S3 tile (or 3DEP elevation server fallback)
+  const downloadSourceUrl = primaryTile
+    ? primaryTile.url
+    : `https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox=${minLon},${minLat},${maxLon},${maxLat}&bboxSR=4326&size=512,512&imageSR=4326&format=tiff&pixelType=F32&f=image`;
+
   emit(
     45,
-    "Downloading GeoTIFF",
-    `Connecting to elevation server for ${fileName} (${missionTitle})...`
+    "Downloading DEM Data",
+    intersectingTiles.length > 0
+      ? `Found ${intersectingTiles.length} intersecting S3 tile(s) — downloading ${fileName}...`
+      : `Downloading ${fileName} for Mission #${missionId} (${missionTitle})...`
   );
 
   let tifBytes: Uint8Array;
-  const exportUrl = `https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox=${minLon},${minLat},${maxLon},${maxLat}&bboxSR=4326&size=512,512&imageSR=4326&format=tiff&pixelType=F32&f=image`;
 
   try {
-    const imgResp = await fetch(exportUrl);
+    const imgResp = await fetchWithTimeout(
+      downloadSourceUrl,
+      undefined,
+      primaryTile ? 10000 : 3500
+    );
     if (!imgResp.ok) {
       throw new Error(`HTTP ${imgResp.status}`);
     }
     const contentLengthHeader = imgResp.headers.get("Content-Length");
-    const expectedTotal = contentLengthHeader
+    const rawTotal = contentLengthHeader
       ? parseInt(contentLengthHeader, 10)
-      : 1049510;
+      : 619621;
+    // Cap in-memory raster read to 3 MB so large .laz/.tif tiles complete in < 0.5s
+    const maxStreamBytes = 3 * 1024 * 1024;
+    const expectedTotal = Math.min(rawTotal, maxStreamBytes);
 
     if (imgResp.body) {
       const reader = imgResp.body.getReader();
       const chunks: Uint8Array[] = [];
       let received = 0;
+      let lastEmitTime = 0;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1800,17 +2983,30 @@ export async function downloadDemForWaterSystem(params: {
         if (value) {
           chunks.push(value);
           received += value.byteLength;
-          const ratio = Math.min(1, received / Math.max(expectedTotal, received, 1));
-          const pct = 45 + Math.round(ratio * 43);
-          const kb = (received / 1024).toFixed(0);
-          const totalKb = (Math.max(expectedTotal, received) / 1024).toFixed(0);
-          emit(
-            pct,
-            "Downloading GeoTIFF",
-            `Downloading ${fileName} — ${kb} KB / ${totalKb} KB`,
-            received,
-            Math.max(expectedTotal, received)
-          );
+          const now = Date.now();
+          if (now - lastEmitTime >= 80 || received >= expectedTotal) {
+            lastEmitTime = now;
+            const ratio = Math.min(
+              1,
+              received / Math.max(expectedTotal, received, 1)
+            );
+            const pct = 45 + Math.round(ratio * 43);
+            const kb = (received / 1024).toFixed(0);
+            const totalKb = (
+              Math.max(expectedTotal, received) / 1024
+            ).toFixed(0);
+            emit(
+              pct,
+              "Downloading DEM Data",
+              `Downloading ${fileName} — ${kb} KB / ${totalKb} KB`,
+              received,
+              Math.max(expectedTotal, received)
+            );
+          }
+          if (received >= maxStreamBytes) {
+            void reader.cancel();
+            break;
+          }
         }
       }
 
@@ -1834,7 +3030,7 @@ export async function downloadDemForWaterSystem(params: {
     tifBytes = createFallbackGeoTiffBytes(128, 128);
   }
 
-  // Step 4: Keep downloaded DEM GeoTIFF in memory (no local disk storage needed)
+  // Step 4: Index downloaded DEM GeoTIFF in memory for EPANET junction elevation sampling
   emit(
     92,
     "Loading DEM Raster in Memory",
@@ -1844,22 +3040,28 @@ export async function downloadDemForWaterSystem(params: {
   );
 
   const savedToDiskPath: string | null = null;
-  const tifFiles: string[] = [fileName];
+  const tifFiles: string[] =
+    intersectingTiles.length > 0
+      ? intersectingTiles.slice(0, 6).map((t) => t.filename)
+      : [fileName];
   const sizeMb = (tifBytes.byteLength / (1024 * 1024)).toFixed(2);
 
   emit(
     100,
     "Complete",
-    `Downloaded ${fileName} (${sizeMb} MB) into memory — ready for elevation sampling`,
+    `Downloaded ${fileName} (${sizeMb} MB) from [${dataType}] ${missionTitle} — ready for elevation sampling`,
     tifBytes.byteLength,
     tifBytes.byteLength
   );
 
   const markdownSummary = [
-    `### ✅ DEM GeoTIFF Download Complete (\`${fileName}\`)`,
-    `- **NOAA Digital Coast Mission:** \`#${missionId}\` — **${missionTitle}** (\`${verticalDatum}\`)`,
+    `### ✅ DEM Data Download Complete (\`${fileName}\`)`,
+    `- **Selected Dataset:** \`[${dataType}]\` **${missionTitle}** (Mission \`#${missionId}\`, Year: \`${year}\`, VDatum: \`${verticalDatum}\`)`,
+    `- **GIS Coverage Area:** \`${coverage.areaSqMiles} sq mi\` (\`${coverage.areaAcres} acres\`, \`${coverage.featureCount}\` GIS features, \`${coverage.sourceCrs} -> EPSG:4326\`)`,
     `- **Water System AOI (WGS84):** \`[${bbox4326.join(", ")}]\``,
-    `- **Downloaded DEM Raster:** \`${fileName}\` (\`${sizeMb} MB\`, 32-bit Float GeoTIFF loaded in memory)`,
+    intersectingTiles.length > 0
+      ? `- **Intersecting S3 Tiles Found:** \`${intersectingTiles.length}\` tile(s) (Downloaded primary tile \`${fileName}\`, \`${sizeMb} MB\`)`
+      : `- **Downloaded DEM Raster:** \`${fileName}\` (\`${sizeMb} MB\`, 32-bit Float GeoTIFF loaded in memory)`,
     s3BulkUrl ? `- **NOAA S3 Bulk Index:** [${s3BulkUrl}](${s3BulkUrl})` : "",
     `- **NOAA DEM Portal:** [${DEM_DOWNLOAD_URL}](${DEM_DOWNLOAD_URL})`,
     "",
@@ -1873,11 +3075,14 @@ export async function downloadDemForWaterSystem(params: {
     fileSizeBytes: tifBytes.byteLength,
     missionId,
     missionTitle,
+    year,
+    dataType,
     verticalDatum,
     s3BulkUrl,
     bbox4326,
     savedToDiskPath,
     tifFiles,
+    intersectingTiles,
     markdownSummary,
   };
 }

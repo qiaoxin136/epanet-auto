@@ -199,7 +199,13 @@ function localDriveFolderPlugin(): Plugin {
                 return;
               }
 
-              const resolvedFolder = path.resolve(targetFolder);
+              let resolvedFolder = path.resolve(targetFolder);
+              if (
+                fs.existsSync(resolvedFolder) &&
+                fs.statSync(resolvedFolder).isFile()
+              ) {
+                resolvedFolder = path.dirname(resolvedFolder);
+              }
               if (
                 !fs.existsSync(resolvedFolder) ||
                 !fs.statSync(resolvedFolder).isDirectory()
@@ -236,9 +242,26 @@ function localDriveFolderPlugin(): Plugin {
                 return;
               }
 
-              const jsonEntries = entries.filter((name) =>
-                /\.(json|geojson)$/i.test(name)
+              const hasHydrantJson = entries.some(
+                (n) => n.toLowerCase() === "hydrant.json"
               );
+              const jsonEntries = entries.filter((name) => {
+                if (!/\.(json|geojson)$/i.test(name)) return false;
+                const lower = name.toLowerCase();
+                if (
+                  lower.includes("backflow") ||
+                  lower.includes("fitting") ||
+                  lower.includes("valve") ||
+                  lower.includes("network_structure") ||
+                  lower.includes("psite")
+                ) {
+                  return false;
+                }
+                if (hasHydrantJson && lower.includes("fireflow")) {
+                  return false;
+                }
+                return true;
+              });
               const files: Array<{ name: string; content: string }> = [];
 
               for (const fileName of jsonEntries) {

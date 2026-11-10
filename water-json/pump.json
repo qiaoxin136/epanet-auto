@@ -1,10 +1,86 @@
 {
   "type": "FeatureCollection",
+  "crs": {
+    "type": "name",
+    "properties": {
+      "name": "EPSG:6318"
+    }
+  },
   "features": [
     {
       "type": "Feature",
-      "properties": { "Name": "High Service Booster Pump 1", "Capacity_M": 1.8, "HeadFt": 120 },
-      "geometry": { "type": "Point", "coordinates": [2016000, 745300] }
+      "id": 0,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.26367526871222, 26.762449330755818]
+      },
+      "properties": {
+        "FID": 0,
+        "Rotation": 360,
+        "LifecycleS": "Active",
+        "Subtype": 3,
+        "Name": "50 HP"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 4,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.263621905449114, 26.762468192765855]
+      },
+      "properties": {
+        "FID": 4,
+        "Rotation": 0,
+        "LifecycleS": "Active",
+        "Subtype": 3,
+        "Name": "75 HP"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 5,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.26359677598343, 26.762469890312349]
+      },
+      "properties": {
+        "FID": 5,
+        "Rotation": 0,
+        "LifecycleS": "Active",
+        "Subtype": 3,
+        "Name": "100 HP"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 6,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.263674589162136, 26.762437195078856]
+      },
+      "properties": {
+        "FID": 6,
+        "Rotation": 360,
+        "LifecycleS": "Active",
+        "Subtype": 3,
+        "Name": "50 HP"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 7,
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-82.242766853617496, 26.888584099038447]
+      },
+      "properties": {
+        "FID": 7,
+        "Rotation": 0,
+        "LifecycleS": "Active",
+        "Subtype": 3,
+        "Name": " "
+      }
     }
   ]
 }
