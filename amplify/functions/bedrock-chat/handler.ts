@@ -336,7 +336,7 @@ function extractUpdatedInpFromReply(
       .replace(/^```(?:inp|epanet|txt|text)?\s*/i, "")
       .replace(/\s*```$/i, "")
       .trim();
-    if (cleaned.includes("[JUNCTIONS]") || cleaned.includes("[PIPES]")) {
+    if (/\[[A-Za-z0-9_]+\]/.test(cleaned)) {
       return {
         updatedInpContent: cleaned + "\n",
         updatedInpFileName:
@@ -345,9 +345,9 @@ function extractUpdatedInpFromReply(
     }
   }
 
-  // Fallback: check if the model emitted a full EPANET .inp inside a markdown code fence
+  // Fallback: check if the model emitted EPANET .inp section(s) inside a markdown code fence
   const fenceMatch = replyText.match(
-    /```(?:inp|epanet|txt|text)?\s*(\[TITLE\][\s\S]*?\[END\])\s*```/i
+    /```(?:inp|epanet|txt|text)?\s*(\[[A-Za-z0-9_]+\][\s\S]*?)```/i
   );
   if (fenceMatch && fenceMatch[1]?.trim()) {
     return {

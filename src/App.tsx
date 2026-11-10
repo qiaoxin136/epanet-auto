@@ -1619,8 +1619,46 @@ function App({ user, signOut }: AppProps) {
       return;
     }
 
-    // Ensure an active .inp model is available for AWS Bedrock to inspect or modify
+    // Ensure an active .inp model is available for AWS Bedrock to inspect or modify,
+    // and automatically switch to any stored .inp file explicitly mentioned in the prompt (e.g. "island.inp")
     let currentBuild = buildResult;
+    const mentionedStoredInp = amplifyStoredInpFiles.find((item) =>
+      lowerPrompt.includes(item.fileName.toLowerCase())
+    );
+    if (
+      mentionedStoredInp &&
+      (!currentBuild ||
+        currentBuild.inpFileName.toLowerCase() !==
+          mentionedStoredInp.fileName.toLowerCase())
+    ) {
+      const fetchedContent =
+        await fetchInpFileContentFromAmplifyStorage(mentionedStoredInp);
+      if (fetchedContent) {
+        currentBuild = recalculateBuildResultFromInp(
+          fetchedContent,
+          currentBuild,
+          mentionedStoredInp.fileName,
+          `AWS Amplify Storage (${mentionedStoredInp.source || "Cloud Synced"})`
+        );
+        setBuildResult(currentBuild);
+        setModelName(mentionedStoredInp.fileName.replace(/\.inp$/i, ""));
+      }
+    }
+    if (!currentBuild && amplifyStoredInpFiles.length > 0) {
+      const latestStored = amplifyStoredInpFiles[0];
+      const fetchedContent =
+        await fetchInpFileContentFromAmplifyStorage(latestStored);
+      if (fetchedContent) {
+        currentBuild = recalculateBuildResultFromInp(
+          fetchedContent,
+          null,
+          latestStored.fileName,
+          `AWS Amplify Storage (${latestStored.source || "Cloud Synced"})`
+        );
+        setBuildResult(currentBuild);
+        setModelName(latestStored.fileName.replace(/\.inp$/i, ""));
+      }
+    }
     if (!currentBuild) {
       const activeLayers =
         Object.keys(waterLayers).length > 0

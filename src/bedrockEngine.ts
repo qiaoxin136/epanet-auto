@@ -615,27 +615,284 @@ export async function loadInpFromAmplifyBackend(): Promise<{
   }
 }
 
+interface InpSectionBlock {
+  name: string;
+  headerLine: string;
+  lines: string[];
+}
+
+function parseInpIntoSections(inpText: string): InpSectionBlock[] {
+  const rawLines = inpText.split(/\r?\n/);
+  const sections: InpSectionBlock[] = [];
+  let current: InpSectionBlock | null = null;
+
+  for (const line of rawLines) {
+    const match = line.trim().match(/^\[([A-Za-z0-9_]+)\]$/);
+    if (match) {
+      current = {
+        name: match[1].toUpperCase(),
+        headerLine: `[${match[1].toUpperCase()}]`,
+        lines: [],
+      };
+      sections.push(current);
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+  return sections;
+}
+
+function buildCompactInpPromptView(
+  inpContent: string,
+  userHintText: string = ""
+): string {
+  const trimmed = inpContent.trim();
+  if (trimmed.length <= 14000) {
+    return trimmed;
+  }
+
+  const mentionedIds = new Set<string>();
+  const idMatches =
+    userHintText.match(/\b(?:[PNTH]|pump|WTP|PZ|C_pump)[A-Za-z0-9_]*\b/gi) || [];
+  for (const id of idMatches) {
+    mentionedIds.add(id.toLowerCase());
+  }
+
+  const sections = parseInpIntoSections(trimmed);
+  const largeSectionNames = new Set([
+    "JUNCTIONS",
+    "PIPES",
+    "COORDINATES",
+    "VERTICES",
+  ]);
+  const outLines: string[] = [];
+
+  for (const sec of sections) {
+    outLines.push(sec.headerLine);
+    if (!largeSectionNames.has(sec.name) || sec.lines.length <= 45) {
+      outLines.push(...sec.lines);
+      continue;
+    }
+
+    const commentHeaders = sec.lines.filter((l) => l.trim().startsWith(";"));
+    const dataRows = sec.lines.filter(
+      (l) => l.trim().length > 0 && !l.trim().startsWith(";")
+    );
+
+    if (commentHeaders.length > 0) {
+      outLines.push(commentHeaders[0]);
+    }
+
+    const headSlice = dataRows.slice(0, 18);
+    const tailSlice = dataRows.slice(Math.max(18, dataRows.length - 5));
+    const matchedRows = dataRows.filter((row) => {
+      const cols = row.trim().split(/\s+/);
+      return cols.some((c) => mentionedIds.has(c.toLowerCase()));
+    });
+
+    const combined = Array.from(
+      new Set([...headSlice, ...matchedRows, ...tailSlice])
+    );
+    outLines.push(...combined.slice(0, 30));
+    outLines.push(
+      `; ... [${dataRows.length} total rows in [${sec.name}] — all ${dataRows.length} rows are preserved automatically on update] ...`,
+      ""
+    );
+  }
+
+  return outLines.join("\n");
+}
+
+export function mergeUpdatedInpPreservingIntegrity(
+  originalInp: string | undefined | null,
+  candidateInp: string
+): string {
+  const cleanedCandidate = candidateInp.trim();
+  if (!originalInp || !originalInp.trim()) {
+    return cleanedCandidate + "\n";
+  }
+
+  const origSections = parseInpIntoSections(originalInp);
+  const candSections = parseInpIntoSections(cleanedCandidate);
+  if (origSections.length === 0 || candSections.length === 0) {
+    return cleanedCandidate + "\n";
+  }
+
+  const candByName = new Map<string, InpSectionBlock>();
+  for (const cs of candSections) {
+    if (cs.name !== "END") {
+      candByName.set(cs.name, cs);
+    }
+  }
+
+  const multiRowIdSections = new Set(["CURVES", "PATTERNS"]);
+  const keyedRowSections = new Set([
+    "JUNCTIONS",
+    "RESERVOIRS",
+    "TANKS",
+    "PIPES",
+    "PUMPS",
+    "VALVES",
+    "STATUS",
+    "COORDINATES",
+  ]);
+  const optionKeySections = new Set(["OPTIONS", "TIMES", "REPORT"]);
+
+  const getFirstToken = (line: string): string => {
+    const noComment = line.split(";")[0].trim();
+    if (!noComment) return "";
+    return noComment.split(/\s+/)[0] || "";
+  };
+
+  const mergedSections: InpSectionBlock[] = origSections.map((origSec) => {
+    const candSec = candByName.get(origSec.name);
+    if (!candSec) return origSec;
+
+    const candDataLines = candSec.lines.filter((l) => {
+      const t = l.trim();
+      if (!t || t.startsWith(";")) return false;
+      if (t.includes("...")) return false;
+      return true;
+    });
+
+    if (candDataLines.length === 0) {
+      return origSec;
+    }
+
+    if (origSec.name === "TITLE") {
+      return candSec;
+    }
+
+    if (multiRowIdSections.has(origSec.name)) {
+      // Group candidate rows by Curve/Pattern ID and replace those IDs in original section while preserving all other curves/patterns
+      const updatedIds = new Set<string>();
+      for (const l of candDataLines) {
+        const id = getFirstToken(l).toLowerCase();
+        if (id) updatedIds.add(id);
+      }
+      if (updatedIds.size === 0) return origSec;
+
+      const keptLines: string[] = [];
+      let insertedUpdatedBlock = false;
+
+      for (const line of origSec.lines) {
+        const tok = getFirstToken(line).toLowerCase();
+        if (tok && updatedIds.has(tok)) {
+          if (!insertedUpdatedBlock) {
+            for (const cLine of candSec.lines) {
+              const cTok = getFirstToken(cLine).toLowerCase();
+              if (cTok && updatedIds.has(cTok)) {
+                keptLines.push(cLine);
+              } else if (
+                cLine.trim().startsWith(";") &&
+                !cLine.toLowerCase().includes("id ") &&
+                Array.from(updatedIds).some((u) =>
+                  cLine.toLowerCase().includes(u.replace(/^c_/, ""))
+                )
+              ) {
+                keptLines.push(cLine);
+              }
+            }
+            insertedUpdatedBlock = true;
+          }
+          continue;
+        }
+        keptLines.push(line);
+      }
+
+      if (!insertedUpdatedBlock) {
+        keptLines.push(...candDataLines);
+      }
+      keptLines.push("");
+      return { ...origSec, lines: keptLines };
+    }
+
+    if (keyedRowSections.has(origSec.name)) {
+      const origDataCount = origSec.lines.filter(
+        (l) => l.trim() && !l.trim().startsWith(";")
+      ).length;
+
+      // If candidate provides a full replacement with >= origDataCount rows and no omissions, use it;
+      // otherwise patch matching IDs in place so no junctions/pipes/tanks/pumps are ever lost!
+      const candById = new Map<string, string>();
+      const candOrder: string[] = [];
+      for (const l of candDataLines) {
+        const id = getFirstToken(l).toLowerCase();
+        if (id) {
+          if (!candById.has(id)) candOrder.push(id);
+          candById.set(id, l);
+        }
+      }
+
+      if (candById.size === 0) return origSec;
+
+      // Never let a partial snippet wipe out a large table
+      if (origDataCount > 0 && candById.size < origDataCount) {
+        const seenIds = new Set<string>();
+        const patchedLines = origSec.lines.map((line) => {
+          const id = getFirstToken(line).toLowerCase();
+          if (id && candById.has(id)) {
+            seenIds.add(id);
+            return candById.get(id)!;
+          }
+          return line;
+        });
+        for (const id of candOrder) {
+          if (!seenIds.has(id)) {
+            patchedLines.push(candById.get(id)!);
+          }
+        }
+        return { ...origSec, lines: patchedLines };
+      }
+
+      return candSec;
+    }
+
+    if (optionKeySections.has(origSec.name)) {
+      return candSec;
+    }
+
+    return origSec;
+  });
+
+  const out: string[] = [];
+  for (const sec of mergedSections) {
+    out.push(sec.headerLine);
+    out.push(...sec.lines);
+    if (out[out.length - 1]?.trim() !== "") {
+      out.push("");
+    }
+  }
+  return out.join("\n").trim() + "\n";
+}
+
 function buildSystemPromptWithActiveInp(
   baseSystemPrompt: string,
   activeInpContent?: string,
-  activeInpFileName?: string
+  activeInpFileName?: string,
+  userHintText: string = ""
 ): string {
   const trimmedBase = baseSystemPrompt.trim();
   if (!activeInpContent || !activeInpContent.trim()) {
     return trimmedBase;
   }
   const fileName = (activeInpFileName || "water_distribution_model.inp").trim();
+  const compactView = buildCompactInpPromptView(activeInpContent, userHintText);
+  const isLargeFile = activeInpContent.trim().length > 14000;
+
   return [
     trimmedBase,
     "",
     `You have direct read and write access to the active EPANET 2.2 hydraulic model file "${fileName}" stored in the AWS Amplify backend.`,
     "Whenever the user asks you to modify, update, edit, add, remove, open, close, or change any component, parameter, pipe diameter/roughness/status, junction elevation/demand, tank level/diameter, pump curve, reservoir head, valve, pattern, or option in the .inp file:",
     "1. Briefly explain the exact modifications you made to the EPANET .inp model.",
-    `2. Output the COMPLETE modified EPANET 2.2 .inp file wrapped inside <UPDATED_EPANET_INP filename="${fileName}"> and </UPDATED_EPANET_INP> tags.`,
-    "3. Preserve all existing sections ([TITLE], [JUNCTIONS], [RESERVOIRS], [TANKS], [PIPES], [PUMPS], [VALVES], [STATUS], [PATTERNS], [CURVES], [TIMES], [REPORT], [OPTIONS], [COORDINATES], [VERTICES], [END]) and only change the lines requested by the user.",
+    isLargeFile
+      ? `2. Output ONLY the modified EPANET section(s) (for example [PUMPS] and [CURVES], or the specific modified rows) wrapped inside <UPDATED_EPANET_INP filename="${fileName}"> and </UPDATED_EPANET_INP> tags. All unmodified sections and rows ([JUNCTIONS], [PIPES], [COORDINATES], [VERTICES], etc.) are automatically merged and preserved with 100% file integrity.`
+      : `2. Output the modified EPANET 2.2 .inp sections wrapped inside <UPDATED_EPANET_INP filename="${fileName}"> and </UPDATED_EPANET_INP> tags.`,
+    "3. Use valid EPANET 2.2 section headers (e.g. [CURVES], [PUMPS], [TANKS], [JUNCTIONS], [PIPES], [STATUS], [OPTIONS]) inside <UPDATED_EPANET_INP>.",
     "",
     `<ACTIVE_EPANET_INP filename="${fileName}">`,
-    activeInpContent.trim(),
+    compactView,
     "</ACTIVE_EPANET_INP>",
   ].join("\n");
 }
@@ -644,13 +901,14 @@ function parseAndCleanUpdatedInpFromReply(
   rawReply: string,
   explicitUpdatedInp?: string | null,
   explicitUpdatedName?: string | null,
-  defaultFileName?: string
+  defaultFileName?: string,
+  originalInpContent?: string
 ): {
   cleanedReply: string;
   updatedInpContent: string | null;
   updatedInpFileName: string | null;
 } {
-  let updatedInpContent: string | null = explicitUpdatedInp?.trim() || null;
+  let rawCandidateInp: string | null = explicitUpdatedInp?.trim() || null;
   let updatedInpFileName: string | null =
     explicitUpdatedName?.trim() || defaultFileName || null;
 
@@ -664,30 +922,34 @@ function parseAndCleanUpdatedInpFromReply(
       .replace(/^```(?:inp|epanet|txt|text)?\s*/i, "")
       .replace(/\s*```$/i, "")
       .trim();
-    if (extracted.includes("[JUNCTIONS]") || extracted.includes("[PIPES]")) {
-      updatedInpContent = extracted + "\n";
+    if (/\[[A-Za-z0-9_]+\]/.test(extracted)) {
+      rawCandidateInp = extracted;
       updatedInpFileName = (
         tagMatch[1] ||
         defaultFileName ||
         "water_distribution_model.inp"
       ).trim();
     }
-  } else if (!updatedInpContent) {
+  } else if (!rawCandidateInp) {
     const fenceMatch = rawReply.match(
-      /```(?:inp|epanet|txt|text)?\s*(\[TITLE\][\s\S]*?\[END\])\s*```/i
+      /```(?:inp|epanet|txt|text)?\s*(\[[A-Za-z0-9_]+\][\s\S]*?)```/i
     );
     if (fenceMatch && fenceMatch[1]?.trim()) {
-      updatedInpContent = fenceMatch[1].trim() + "\n";
+      rawCandidateInp = fenceMatch[1].trim();
       updatedInpFileName = (
         defaultFileName || "water_distribution_model.inp"
       ).trim();
     }
   }
 
+  const updatedInpContent = rawCandidateInp
+    ? mergeUpdatedInpPreservingIntegrity(originalInpContent, rawCandidateInp)
+    : null;
+
   let cleanedReply = rawReply.replace(tagRegex, "").trim();
   if (updatedInpContent) {
     const fileLabel = updatedInpFileName || "water_distribution_model.inp";
-    const badgeLine = `\n\n---\n✅ **AWS Bedrock Modified \`${fileLabel}\` in Amplify Backend** — The updated EPANET 2.2 \`.inp\` file has been synced to the right-hand **Built Model** panel and is ready to inspect or download.`;
+    const badgeLine = `\n\n---\n✅ **AWS Bedrock Modified \`${fileLabel}\` in Amplify Backend** — The updated EPANET 2.2 \`.inp\` file has been merged with 100% integrity and synced to the right-hand **Built Model** panel and AWS Amplify Storage.`;
     if (!cleanedReply.includes("AWS Bedrock Modified")) {
       cleanedReply = `${cleanedReply}${badgeLine}`.trim();
     }
@@ -716,11 +978,19 @@ export async function queryBedrockGpt6Sol(
 
   try {
     const preparedMessages = await prepareMessagesWithPdfExtraction(messages);
+    const lastUserText =
+      [...preparedMessages].reverse().find((m) => m.role === "user")?.content ||
+      "";
     const effectiveSystemPrompt = buildSystemPromptWithActiveInp(
       systemPrompt,
       activeInpContent,
-      activeInpFileName
+      activeInpFileName,
+      lastUserText
     );
+    const compactInpForTransport =
+      activeInpContent && activeInpContent.length > 14000
+        ? undefined
+        : activeInpContent;
 
     type RawBedrockResponse = NonNullable<AskGpt6SolGraphqlResponse["data"]>;
     let data: RawBedrockResponse | null = null;
@@ -740,7 +1010,7 @@ export async function queryBedrockGpt6Sol(
             systemPrompt: effectiveSystemPrompt,
             temperature,
             mode: "bedrock",
-            inpContent: activeInpContent,
+            inpContent: compactInpForTransport,
             inpFileName: activeInpFileName,
           }),
           signal,
@@ -764,7 +1034,7 @@ export async function queryBedrockGpt6Sol(
         systemPrompt: effectiveSystemPrompt,
         temperature,
         mode: "bedrock",
-        inpContent: activeInpContent,
+        inpContent: compactInpForTransport,
         inpFileName: activeInpFileName,
       });
 
@@ -781,7 +1051,7 @@ export async function queryBedrockGpt6Sol(
           systemPrompt: effectiveSystemPrompt,
           temperature,
           mode: "bedrock",
-          inpContent: activeInpContent,
+          inpContent: compactInpForTransport,
           inpFileName: activeInpFileName,
         }),
         signal,
@@ -800,7 +1070,8 @@ export async function queryBedrockGpt6Sol(
           data.reply,
           data.updatedInpContent,
           data.updatedInpFileName,
-          activeInpFileName
+          activeInpFileName,
+          activeInpContent
         );
 
       if (updatedInpContent && updatedInpFileName) {
