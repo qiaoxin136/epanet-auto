@@ -1602,6 +1602,11 @@
   border-color: #bbf7d0;
 }
 
+.build-step-item.error {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
 .build-step-icon {
   width: 22px;
   height: 22px;
@@ -1630,6 +1635,12 @@
   color: #059669;
 }
 
+.build-step-item.error .build-step-icon {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #dc2626;
+}
+
 .build-step-content {
   display: flex;
   flex-direction: column;
@@ -1651,6 +1662,10 @@
 
 .build-step-item.completed .build-step-title {
   color: #065f46;
+}
+
+.build-step-item.error .build-step-title {
+  color: #991b1b;
 }
 
 .build-step-detail {

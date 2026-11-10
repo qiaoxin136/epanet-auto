@@ -19,6 +19,7 @@ import {
   DEM_DOWNLOAD_URL,
   DemDownloadProgress,
   DemIntersectingTile,
+  DownloadedDemRaster,
   GisCoverageSummary,
   NoaaDemDatasetOption,
   UploadedLayerInfo,
@@ -29,6 +30,7 @@ import {
   createSampleWaterSystemLayers,
   discoverDemOptionsForWaterSystem,
   downloadDemForWaterSystem,
+  getLatestDownloadedDemRaster,
   isLikelyPipeJsonFile,
   parseWaterJsonFile,
   recalculateBuildResultFromInp,
@@ -45,7 +47,7 @@ interface BuildStepItem {
   stepNumber: number;
   title: string;
   detail: string;
-  status: "pending" | "running" | "completed";
+  status: "pending" | "running" | "completed" | "error";
 }
 
 function createInitialBuildSteps(
@@ -71,7 +73,7 @@ function createInitialBuildSteps(
       id: "step-dem",
       stepNumber: 3,
       title: "Sample DEM GeoTIFF Elevations",
-      detail: "Extract ground elevations (ft) for junctions, storage tanks, and reservoirs",
+      detail: "Extract ground elevations (ft) strictly from the downloaded DEM GeoTIFF",
       status: "pending",
     },
     {
@@ -437,6 +439,8 @@ function App({ user, signOut }: AppProps) {
   const [demIntersectingTiles, setDemIntersectingTiles] = useState<
     DemIntersectingTile[]
   >([]);
+  const [downloadedDemRaster, setDownloadedDemRaster] =
+    useState<DownloadedDemRaster | null>(null);
   const [demDownloadProgress, setDemDownloadProgress] =
     useState<DemDownloadProgress | null>(null);
   const [demDownloadError, setDemDownloadError] = useState<string | null>(null);
@@ -1186,6 +1190,7 @@ function App({ user, signOut }: AppProps) {
       if (result.intersectingTiles.length > 0) {
         setDemIntersectingTiles(result.intersectingTiles);
       }
+      setDownloadedDemRaster(result.demRaster);
 
       setDemTileNames((prev) =>
         Array.from(new Set([...prev, ...result.tifFiles]))
@@ -1292,16 +1297,62 @@ function App({ user, signOut }: AppProps) {
       );
       await pause(240);
 
-      // Compute full build result so we can report exact stats across steps 2-6
+      // Advance to Step 3: DEM Sampling (ONLY using the downloaded DEM GeoTIFF)
+      const activeDemRaster =
+        downloadedDemRaster ?? getLatestDownloadedDemRaster();
+
+      setBuildSteps((prev) =>
+        prev.map((s, idx) => {
+          if (idx === 1) {
+            return {
+              ...s,
+              status: "completed",
+              detail: `CRS ${targetCrs} (ftUS) · Standardizing P00001…, N0001…, T001…, pump001…`,
+            };
+          }
+          if (idx === 2) return { ...s, status: "running" };
+          return s;
+        })
+      );
+      setBuildProgressPercent(48);
+      setBuildStageText("Step 3/6: Sampling DEM GeoTIFF Elevations...");
+
+      if (!activeDemRaster) {
+        const demErrMsg =
+          "No downloaded DEM GeoTIFF found. Please download DEM data in Step 2 first — Step 3 only uses the downloaded DEM to sample elevations.";
+        setBuildStageText("Step 3/6 Blocked: Downloaded DEM Required");
+        setBuildDetailText(demErrMsg);
+        setBuildSteps((prev) =>
+          prev.map((s, idx) =>
+            idx === 2
+              ? {
+                  ...s,
+                  status: "error",
+                  detail: demErrMsg,
+                }
+              : s
+          )
+        );
+        return;
+      }
+
+      setBuildDetailText(
+        `Sampling ground elevations solely from downloaded DEM ${activeDemRaster.fileName}...`
+      );
+      await pause(240);
+
+      // Compute full build result strictly using the downloaded DEM GeoTIFF raster
       const built = buildEpanetModel(
         modelName,
         targetCrs,
-        demTileNames.length > 0 ? demTileNames.join(", ") : "Cloud DEM (In-Memory)",
+        activeDemRaster.fileName,
         activeLayers,
-        waterJsonFolder
+        waterJsonFolder,
+        activeDemRaster,
+        true
       );
 
-      // Advance to Step 3: DEM Sampling
+      // Update Step 2 with exact FacilityID ranges and advance to Step 4: Topology & Auto-Connect
       setBuildSteps((prev) =>
         prev.map((s, idx) => {
           if (idx === 1) {
@@ -1311,25 +1362,11 @@ function App({ user, signOut }: AppProps) {
               detail: `CRS ${built.crs} (ftUS) · Pipes ${built.facilityIdRanges.Pipes} · Nodes ${built.facilityIdRanges.Junctions}`,
             };
           }
-          if (idx === 2) return { ...s, status: "running" };
-          return s;
-        })
-      );
-      setBuildProgressPercent(48);
-      setBuildStageText("Step 3/6: Sampling DEM GeoTIFF Elevations...");
-      setBuildDetailText(
-        `Sampling ground elevations in memory for ${built.stats.demSampledNodes} nodes...`
-      );
-      await pause(240);
-
-      // Advance to Step 4: Topology & Auto-Connect
-      setBuildSteps((prev) =>
-        prev.map((s, idx) => {
           if (idx === 2) {
             return {
               ...s,
               status: "completed",
-              detail: `Sampled elevations for ${built.stats.demSampledNodes} junctions & ${built.stats.tanks} tank(s)`,
+              detail: `Sampled ${built.stats.demSampledNodes} junctions & ${built.stats.tanks} tank(s) solely from downloaded DEM ${activeDemRaster.fileName} (${built.stats.minSampledElevFt.toFixed(2)}–${built.stats.maxSampledElevFt.toFixed(2)} ft ${activeDemRaster.verticalDatum})`,
             };
           }
           if (idx === 3) return { ...s, status: "running" };
@@ -2739,6 +2776,8 @@ function App({ user, signOut }: AppProps) {
                       ? "✅"
                       : step.status === "running"
                       ? "⏳"
+                      : step.status === "error"
+                      ? "❌"
                       : step.stepNumber}
                   </div>
                   <div className="build-step-content">

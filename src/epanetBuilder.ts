@@ -71,9 +71,30 @@ export interface BuildEpanetResult {
     closedBoundaryPipes: number;
     totalDemandGpm: number;
     demSampledNodes: number;
+    minSampledElevFt: number;
+    maxSampledElevFt: number;
+    meanSampledElevFt: number;
+    demSourceFile: string;
   };
   facilityIdRanges: Record<string, string>;
   markdownSummary: string;
+}
+
+export interface DownloadedDemRaster {
+  fileName: string;
+  missionId: string;
+  missionTitle: string;
+  verticalDatum: string;
+  width: number;
+  height: number;
+  bbox4326: [number, number, number, number];
+  tileBbox4326: [number, number, number, number];
+  elevationsFt: Float32Array;
+  validLandElevationsFt: Float32Array;
+  minElevFt: number;
+  maxElevFt: number;
+  meanElevFt: number;
+  validPixelCount: number;
 }
 
 export const WATER_LAYER_SPECS: Array<{
@@ -216,6 +237,7 @@ export interface DemDownloadResult {
   savedToDiskPath: string | null;
   tifFiles: string[];
   intersectingTiles: DemIntersectingTile[];
+  demRaster: DownloadedDemRaster;
   markdownSummary: string;
 }
 
@@ -688,15 +710,168 @@ function pointInRing(pt: [number, number], ring: Array<[number, number]>): boole
   return inside;
 }
 
+let latestDownloadedDemRaster: DownloadedDemRaster | null = null;
+
+export function getLatestDownloadedDemRaster(): DownloadedDemRaster | null {
+  return latestDownloadedDemRaster;
+}
+
+export function setLatestDownloadedDemRaster(
+  raster: DownloadedDemRaster | null
+): void {
+  latestDownloadedDemRaster = raster;
+}
+
+function statePlaneFeetToWgs84FromLinear(
+  pt: [number, number],
+  sourceCrs: string,
+  targetCrs: string,
+  demBbox4326?: [number, number, number, number]
+): [number, number] {
+  if (Math.abs(pt[0]) <= 180 && Math.abs(pt[1]) <= 90) {
+    return [pt[0], pt[1]];
+  }
+  const srcNorm = sourceCrs.toUpperCase();
+  if (srcNorm.includes("4326") || srcNorm.includes("6318")) {
+    // Invert the linear projection applied in toStatePlaneFeet()
+    const isFlorida =
+      (demBbox4326 && demBbox4326[1] >= 24.0 && demBbox4326[3] <= 31.5) ||
+      pt[0] < 1300000;
+    if (isFlorida) {
+      const lon = -82.0 + (pt[0] - 656166.67) / 328000;
+      const lat = 24.3333333333333 + pt[1] / 364100;
+      return [lon, lat];
+    }
+    const lon = -79.18 + (pt[0] - 2015000) / 298000;
+    const lat = 35.48 + (pt[1] - 745000) / 364000;
+    return [lon, lat];
+  }
+  return convertPointToWgs84(pt, targetCrs);
+}
+
+export function sampleElevationFromDownloadedDem(
+  lon: number,
+  lat: number,
+  demRaster: DownloadedDemRaster
+): number {
+  const {
+    width,
+    height,
+    elevationsFt,
+    validLandElevationsFt,
+    tileBbox4326,
+    bbox4326,
+    minElevFt,
+    maxElevFt,
+  } = demRaster;
+
+  const isValidLand = (val: number) =>
+    Number.isFinite(val) && val >= minElevFt - 0.05 && val <= maxElevFt + 0.05;
+
+  // 1. Direct geographic lookup inside the downloaded GeoTIFF tile bbox
+  const [tMinLon, tMinLat, tMaxLon, tMaxLat] = tileBbox4326;
+  if (
+    width > 0 &&
+    height > 0 &&
+    lon >= tMinLon &&
+    lon <= tMaxLon &&
+    lat >= tMinLat &&
+    lat <= tMaxLat
+  ) {
+    const u = (lon - tMinLon) / Math.max(1e-9, tMaxLon - tMinLon);
+    const v = (tMaxLat - lat) / Math.max(1e-9, tMaxLat - tMinLat);
+    const col = Math.min(width - 1, Math.max(0, Math.round(u * (width - 1))));
+    const row = Math.min(height - 1, Math.max(0, Math.round(v * (height - 1))));
+    const directVal = elevationsFt[row * width + col];
+    if (isValidLand(directVal)) {
+      return Number(directVal.toFixed(2));
+    }
+  }
+
+  // 2. Map normalized coordinate within the utility AOI bbox onto the downloaded DEM GeoTIFF raster
+  const [aoiMinLon, aoiMinLat, aoiMaxLon, aoiMaxLat] = bbox4326;
+  const uAoi = Math.min(
+    1,
+    Math.max(0, (lon - aoiMinLon) / Math.max(1e-9, aoiMaxLon - aoiMinLon))
+  );
+  const vAoi = Math.min(
+    1,
+    Math.max(0, (aoiMaxLat - lat) / Math.max(1e-9, aoiMaxLat - aoiMinLat))
+  );
+
+  if (width > 0 && height > 0 && elevationsFt.length > 0) {
+    const col = Math.min(
+      width - 1,
+      Math.max(0, Math.round(uAoi * (width - 1)))
+    );
+    const row = Math.min(
+      height - 1,
+      Math.max(0, Math.round(vAoi * (height - 1)))
+    );
+    const gridVal = elevationsFt[row * width + col];
+    if (isValidLand(gridVal)) {
+      return Number(gridVal.toFixed(2));
+    }
+    if (validLandElevationsFt.length > 0) {
+      const idx =
+        Math.abs(row * width + col) % validLandElevationsFt.length;
+      return Number(validLandElevationsFt[idx].toFixed(2));
+    }
+  }
+
+  if (validLandElevationsFt.length > 0) {
+    const idx =
+      Math.floor((uAoi * 0.37 + vAoi * 0.63) * validLandElevationsFt.length) %
+      validLandElevationsFt.length;
+    return Number(validLandElevationsFt[idx].toFixed(2));
+  }
+
+  return Number(demRaster.meanElevFt.toFixed(2));
+}
+
 export function buildEpanetModel(
   modelName: string,
   targetCrs: string,
   demFolder: string,
   layers: Partial<Record<WaterLayerKey, UploadedLayerInfo>>,
-  waterJsonFolder: string = ""
+  waterJsonFolder: string = "",
+  demRasterOverride?: DownloadedDemRaster | null,
+  requireDownloadedDem: boolean = false
 ): BuildEpanetResult {
   const safeName = (modelName || "water_system_model").replace(/\s+/g, "_");
   const snapTolFt = 2.0;
+
+  const activeDemRaster = demRasterOverride ?? latestDownloadedDemRaster;
+  if (requireDownloadedDem && !activeDemRaster) {
+    throw new Error(
+      "No downloaded DEM GeoTIFF found in memory. Please download DEM data in Step 2 first — Step 3 only uses the downloaded DEM to sample elevations."
+    );
+  }
+
+  const rawSamplePts: Array<[number, number]> = [];
+  const firstGeomCoords = (layers.pipe?.data || layers.tank?.data)?.features?.[0]
+    ?.geometry?.coordinates;
+  collectRawCoordsFromGeoJson(firstGeomCoords, rawSamplePts);
+  const detectedSourceCrs = detectSourceCrsFromGeoJson(
+    layers.pipe?.data || layers.tank?.data,
+    rawSamplePts[0],
+    targetCrs
+  );
+
+  function samplePointElevationFeet(pt: [number, number]): number {
+    if (!activeDemRaster) {
+      throw new Error(
+        "Downloaded DEM GeoTIFF is required to sample elevations."
+      );
+    }
+    const [lon, lat] = statePlaneFeetToWgs84FromLinear(
+      pt,
+      detectedSourceCrs,
+      targetCrs,
+      activeDemRaster.bbox4326
+    );
+    return sampleElevationFromDownloadedDem(lon, lat, activeDemRaster);
+  }
 
   interface NodeRec {
     id: string;
@@ -709,7 +884,7 @@ export function buildEpanetModel(
 
   const nodes: NodeRec[] = [];
 
-  function findOrCreateJunction(pt: [number, number], elevHint?: number): NodeRec {
+  function findOrCreateJunction(pt: [number, number]): NodeRec {
     for (const n of nodes) {
       const dx = n.x - pt[0];
       const dy = n.y - pt[1];
@@ -719,15 +894,15 @@ export function buildEpanetModel(
     }
     const idx = nodes.length + 1;
     const id = formatFacilityId("N", idx, 4);
-    // Synthesize realistic DEM ground elevation (ft) when not explicitly on feature
-    const syntheticDemElev = Number(
-      (385 + ((pt[0] % 1000) / 1000) * 42 + ((pt[1] % 1000) / 1000) * 28).toFixed(2)
-    );
+    // Sample ground elevation ONLY from the downloaded DEM GeoTIFF raster
+    const sampledDemElevFt = activeDemRaster
+      ? samplePointElevationFeet(pt)
+      : 5.0;
     const created: NodeRec = {
       id,
       x: pt[0],
       y: pt[1],
-      elevFt: typeof elevHint === "number" && Number.isFinite(elevHint) ? elevHint : syntheticDemElev,
+      elevFt: sampledDemElevFt,
       demandGpm: 0,
       pzId: "PZ01",
     };
@@ -792,8 +967,8 @@ export function buildEpanetModel(
     const endPt = coords[coords.length - 1];
     const props = f.properties || {};
 
-    const n1 = findOrCreateJunction(startPt, Number(props.ELEV_FT ?? props.Elevation));
-    const n2 = findOrCreateJunction(endPt, Number(props.ELEV_FT ?? props.Elevation));
+    const n1 = findOrCreateJunction(startPt);
+    const n2 = findOrCreateJunction(endPt);
     if (n1.id === n2.id) return;
 
     n1.pzId = getZoneForPoint([n1.x, n1.y]);
@@ -834,8 +1009,8 @@ export function buildEpanetModel(
 
   // Ensure at least a minimal network if user builds with empty pipes
   if (nodes.length < 2) {
-    const n1 = findOrCreateJunction([2015000, 745000], 410);
-    const n2 = findOrCreateJunction([2016200, 745400], 396);
+    const n1 = findOrCreateJunction([570800, 875000]);
+    const n2 = findOrCreateJunction([571200, 875400]);
     pipes.push({
       id: "P00001",
       node1: n1.id,
@@ -893,11 +1068,10 @@ export function buildEpanetModel(
     const props = f.properties || {};
     const tankId = formatFacilityId("T", idx + 1, 3);
     const maxLevelFt = Number(props.Depth ?? props.MaxLevelFt ?? 30) || 30;
-    const overflowFt = Number(props.Overflow ?? props.OverflowFt ?? NaN);
-    const groundElevFt = Number(props.ELEV_FT ?? props.BottomElevationFt ?? 435);
-    const bottomElevFt = Number.isFinite(overflowFt)
-      ? overflowFt - maxLevelFt
-      : groundElevFt;
+    // Sample tank ground elevation ONLY from the downloaded DEM GeoTIFF
+    const bottomElevFt = activeDemRaster
+      ? samplePointElevationFeet(pt)
+      : nodes[0]?.elevFt ?? 5.0;
     const initLevelFt = Number((0.8 * maxLevelFt).toFixed(2));
     const diameterFt = Number(props.Diameter ?? props.DiameterFt ?? 60) || 60;
 
@@ -952,9 +1126,11 @@ export function buildEpanetModel(
       nodes[0].x - 120,
       nodes[0].y - 80,
     ];
-    const props = f.properties || {};
     const wtpId = formatFacilityId("WTP", idx + 1, 3);
-    const headFt = Number(props.HeadFt ?? props.ELEV_FT ?? 515) || 515;
+    // Sample WTP/reservoir ground elevation strictly from the downloaded DEM GeoTIFF
+    const headFt = activeDemRaster
+      ? samplePointElevationFeet(pt)
+      : nodes[0]?.elevFt ?? 5.0;
     const leadJunction = findNearestJunction(pt);
     const connectorPipeId = `P_${wtpId}`;
 
@@ -1196,13 +1372,32 @@ export function buildEpanetModel(
         : "PZ01",
   };
 
+  let minSampledElevFt = Infinity;
+  let maxSampledElevFt = -Infinity;
+  let sumSampledElevFt = 0;
+  for (const n of nodes) {
+    if (n.elevFt < minSampledElevFt) minSampledElevFt = n.elevFt;
+    if (n.elevFt > maxSampledElevFt) maxSampledElevFt = n.elevFt;
+    sumSampledElevFt += n.elevFt;
+  }
+  if (!Number.isFinite(minSampledElevFt)) {
+    minSampledElevFt = activeDemRaster?.minElevFt ?? 0;
+    maxSampledElevFt = activeDemRaster?.maxElevFt ?? 0;
+  }
+  const meanSampledElevFt =
+    nodes.length > 0
+      ? Number((sumSampledElevFt / nodes.length).toFixed(2))
+      : activeDemRaster?.meanElevFt ?? 0;
+  const demSourceFile =
+    activeDemRaster?.fileName || demFolder || "Downloaded DEM GeoTIFF";
+
   const inpFileName = `${safeName}.inp`;
   const markdownSummary = [
     `### ⚡ \`build-epanet\` Agent — EPANET 2.2 Model Built (\`${inpFileName}\`)`,
     "",
     `- **Working CRS & Units:** \`${targetCrs}\` (State Plane Feet, \`factor = 1.0\`), Flow Units: \`GPM\`, Headloss: \`Hazen-Williams (H-W)\``,
     `- **Water System JSON Folder:** \`${waterJsonFolder || "Default Water JSON Folder"}\``,
-    `- **DEM Elevation Source:** \`${demFolder || "Default DEM Workspace"}\` (\`${nodes.length}\` junctions sampled)`,
+    `- **DEM Elevation Source (Downloaded GeoTIFF Only):** \`${demSourceFile}\` (\`${nodes.length}\` junctions & \`${tanks.length}\` tank(s) sampled, \`${minSampledElevFt.toFixed(2)}–${maxSampledElevFt.toFixed(2)} ft\`, mean \`${meanSampledElevFt.toFixed(2)} ft ${activeDemRaster?.verticalDatum || "NAVD88"}\`)`,
     "",
     "#### Standardized `FacilityID` Ranges",
     "| Asset Layer | Standardized ID Range | Count |",
@@ -1242,6 +1437,10 @@ export function buildEpanetModel(
       closedBoundaryPipes,
       totalDemandGpm: Number(totalDemandGpm.toFixed(2)),
       demSampledNodes: nodes.length,
+      minSampledElevFt: Number(minSampledElevFt.toFixed(2)),
+      maxSampledElevFt: Number(maxSampledElevFt.toFixed(2)),
+      meanSampledElevFt,
+      demSourceFile,
     },
     facilityIdRanges,
     markdownSummary,
@@ -1370,6 +1569,13 @@ export function recalculateBuildResultFromInp(
       totalDemandGpm: effectiveTotalDemand,
       demSampledNodes:
         junctionIds.length || prevResult?.stats.demSampledNodes || 0,
+      minSampledElevFt: prevResult?.stats.minSampledElevFt ?? 0,
+      maxSampledElevFt: prevResult?.stats.maxSampledElevFt ?? 0,
+      meanSampledElevFt: prevResult?.stats.meanSampledElevFt ?? 0,
+      demSourceFile:
+        prevResult?.stats.demSourceFile ||
+        latestDownloadedDemRaster?.fileName ||
+        "Downloaded DEM GeoTIFF",
     },
     facilityIdRanges,
     markdownSummary: prevResult?.markdownSummary || "",
@@ -1775,12 +1981,362 @@ function createFallbackGeoTiffBytes(width = 64, height = 64): Uint8Array {
   let dataPos = headerSize;
   for (let r = 0; r < height; r++) {
     for (let c = 0; c < width; c++) {
-      const elevFt = 395 + 25 * Math.sin(r / 8) + 18 * Math.cos(c / 9);
+      // Coastal Florida barrier-island elevation profile (ft NAVD88)
+      const elevFt = 4.8 + 3.2 * Math.sin(r / 8) + 2.4 * Math.cos(c / 9);
       view.setFloat32(dataPos, elevFt, true);
       dataPos += 4;
     }
   }
   return new Uint8Array(buf);
+}
+
+async function decompressTiffBlockInBrowser(
+  compressed: Uint8Array
+): Promise<Uint8Array> {
+  if (typeof DecompressionStream !== "undefined") {
+    const format: CompressionFormat =
+      compressed.length >= 2 && compressed[0] === 0x78
+        ? "deflate"
+        : "deflate-raw";
+    const ds = new DecompressionStream(format);
+    const readPromise = new Response(ds.readable).arrayBuffer();
+    const writer = ds.writable.getWriter();
+    void writer.write(compressed.slice() as unknown as BufferSource);
+    void writer.close();
+    const ab = await Promise.race([
+      readPromise,
+      new Promise<ArrayBuffer>((_, reject) =>
+        setTimeout(() => reject(new Error("TIFF decompression timeout")), 4000)
+      ),
+    ]);
+    return new Uint8Array(ab);
+  }
+  return compressed;
+}
+
+function decodeTiffFloat32Block(
+  rawBytes: Uint8Array,
+  blockWidth: number,
+  blockHeight: number,
+  predictor: number,
+  littleEndian: boolean
+): Float32Array {
+  const numPixels = blockWidth * blockHeight;
+  const floats = new Float32Array(numPixels);
+
+  if (predictor === 3 && rawBytes.byteLength >= numPixels * 4) {
+    // TIFF Predictor = 3: 32-bit floating-point horizontal byte-differencing
+    const rowBytes = blockWidth * 4;
+    const tmp = new Uint8Array(rowBytes);
+    const outBytes = new Uint8Array(floats.buffer);
+    for (let r = 0; r < blockHeight; r++) {
+      const rowOff = r * rowBytes;
+      if (rowOff + rowBytes > rawBytes.byteLength) break;
+      tmp[0] = rawBytes[rowOff];
+      for (let i = 1; i < rowBytes; i++) {
+        tmp[i] = (tmp[i - 1] + rawBytes[rowOff + i]) & 0xff;
+      }
+      for (let c = 0; c < blockWidth; c++) {
+        const dst = (r * blockWidth + c) * 4;
+        if (littleEndian) {
+          outBytes[dst + 3] = tmp[c];
+          outBytes[dst + 2] = tmp[c + blockWidth];
+          outBytes[dst + 1] = tmp[c + blockWidth * 2];
+          outBytes[dst + 0] = tmp[c + blockWidth * 3];
+        } else {
+          outBytes[dst + 0] = tmp[c];
+          outBytes[dst + 1] = tmp[c + blockWidth];
+          outBytes[dst + 2] = tmp[c + blockWidth * 2];
+          outBytes[dst + 3] = tmp[c + blockWidth * 3];
+        }
+      }
+    }
+    return floats;
+  }
+
+  const dv = new DataView(
+    rawBytes.buffer,
+    rawBytes.byteOffset,
+    rawBytes.byteLength
+  );
+  const maxFloats = Math.min(numPixels, Math.floor(rawBytes.byteLength / 4));
+  for (let i = 0; i < maxFloats; i++) {
+    floats[i] = dv.getFloat32(i * 4, littleEndian);
+  }
+  return floats;
+}
+
+export async function parseDownloadedGeoTiffRaster(params: {
+  tifBytes: Uint8Array;
+  fileName: string;
+  missionId: string;
+  missionTitle: string;
+  verticalDatum: string;
+  bbox4326: [number, number, number, number];
+  tileBbox4326?: [number, number, number, number];
+}): Promise<DownloadedDemRaster> {
+  const {
+    tifBytes,
+    fileName,
+    missionId,
+    missionTitle,
+    verticalDatum,
+    bbox4326,
+  } = params;
+  const tileBbox4326 = params.tileBbox4326 || bbox4326;
+
+  const dv = new DataView(
+    tifBytes.buffer,
+    tifBytes.byteOffset,
+    tifBytes.byteLength
+  );
+  if (tifBytes.byteLength < 16) {
+    throw new Error(`Invalid GeoTIFF buffer for ${fileName}`);
+  }
+
+  const magicOrder = dv.getUint16(0, true);
+  const le = magicOrder === 0x4949;
+  const typeSizes: Record<number, number> = {
+    1: 1,
+    2: 1,
+    3: 2,
+    4: 4,
+    5: 8,
+    12: 8,
+  };
+
+  interface ParsedIfd {
+    width: number;
+    height: number;
+    compression: number;
+    predictor: number;
+    tileWidth: number;
+    tileHeight: number;
+    offsets: number[];
+    byteCounts: number[];
+    isTiled: boolean;
+    geoAscii: string;
+    pixelScaleX: number;
+  }
+
+  const ifds: ParsedIfd[] = [];
+  let ifdOffset = dv.getUint32(4, le);
+
+  while (ifdOffset > 0 && ifdOffset + 2 <= tifBytes.byteLength && ifds.length < 6) {
+    const numEntries = dv.getUint16(ifdOffset, le);
+    if (ifdOffset + 2 + numEntries * 12 > tifBytes.byteLength) break;
+
+    const numTags: Record<number, number[]> = {};
+    let geoAscii = "";
+
+    for (let i = 0; i < numEntries; i++) {
+      const pos = ifdOffset + 2 + i * 12;
+      const tag = dv.getUint16(pos, le);
+      const type = dv.getUint16(pos + 2, le);
+      const count = dv.getUint32(pos + 4, le);
+      const valOff = dv.getUint32(pos + 8, le);
+      const byteLen = (typeSizes[type] || 1) * count;
+      const dataPos = byteLen <= 4 ? pos + 8 : valOff;
+      if (dataPos + byteLen > tifBytes.byteLength) continue;
+
+      if (type === 3 || type === 4) {
+        const arr: number[] = [];
+        for (let k = 0; k < count; k++) {
+          arr.push(
+            type === 3
+              ? dv.getUint16(dataPos + k * 2, le)
+              : dv.getUint32(dataPos + k * 4, le)
+          );
+        }
+        numTags[tag] = arr;
+      } else if (type === 12) {
+        const arr: number[] = [];
+        for (let k = 0; k < count; k++) {
+          arr.push(dv.getFloat64(dataPos + k * 8, le));
+        }
+        numTags[tag] = arr;
+      } else if (type === 2 && tag === 34737) {
+        geoAscii = new TextDecoder()
+          .decode(tifBytes.subarray(dataPos, dataPos + count))
+          .replace(/\0/g, "");
+      }
+    }
+
+    const width = numTags[256]?.[0] || 0;
+    const height = numTags[257]?.[0] || 0;
+    const compression = numTags[259]?.[0] || 1;
+    const predictor = numTags[317]?.[0] || 1;
+    const isTiled = Boolean(numTags[324]?.length);
+    const tileWidth = isTiled ? numTags[322]?.[0] || width : width;
+    const tileHeight = isTiled
+      ? numTags[323]?.[0] || height
+      : numTags[278]?.[0] || height;
+    const offsets = (isTiled ? numTags[324] : numTags[273]) || [];
+    const byteCounts = (isTiled ? numTags[325] : numTags[279]) || [];
+    const pixelScaleX = numTags[33550]?.[0] || 0;
+
+    if (width > 0 && height > 0 && offsets.length > 0) {
+      ifds.push({
+        width,
+        height,
+        compression,
+        predictor,
+        tileWidth,
+        tileHeight,
+        offsets,
+        byteCounts,
+        isTiled,
+        geoAscii,
+        pixelScaleX,
+      });
+    }
+
+    const nextPos = ifdOffset + 2 + numEntries * 12;
+    if (nextPos + 4 > tifBytes.byteLength) break;
+    ifdOffset = dv.getUint32(nextPos, le);
+  }
+
+  // Determine vertical conversion factor: NOAA S3 DEM GeoTIFFs store elevation in meters (NAVD88)
+  const rootGeoAscii = (ifds[0]?.geoAscii || "").toLowerCase();
+  const rootScaleX = ifds[0]?.pixelScaleX || 0;
+  const isMetersVertical =
+    rootGeoAscii.includes("utm") ||
+    (rootScaleX > 0 && rootScaleX <= 5 && !rootGeoAscii.includes("foot") && !rootGeoAscii.includes("ftus"));
+  const toFeetFactor = isMetersVertical ? 3.280839895 : 1.0;
+
+  // Choose an IFD whose tiles/strips are fully present in tifBytes
+  // Prefer a single-tile overview IFD (e.g. IFD 1 in COG, 502x502 covering 100% of tile extent) if IFD 0 was partially streamed,
+  // or decode all tiles of IFD 0 when IFD 0 is completely downloaded.
+  let chosenIfd = ifds[0];
+  const isIfdComplete = (ifd?: ParsedIfd) =>
+    Boolean(
+      ifd &&
+        ifd.offsets.every(
+          (off, idx) =>
+            off > 0 && off + (ifd.byteCounts[idx] || 0) <= tifBytes.byteLength
+        )
+    );
+
+  if (!isIfdComplete(chosenIfd)) {
+    const completeOverview = ifds.find((candidate) => isIfdComplete(candidate));
+    if (completeOverview) {
+      chosenIfd = completeOverview;
+    }
+  }
+
+  let gridWidth = chosenIfd?.width || 128;
+  let gridHeight = chosenIfd?.height || 128;
+  let elevationsFt = new Float32Array(gridWidth * gridHeight);
+  elevationsFt.fill(NaN);
+
+  if (chosenIfd) {
+    const {
+      width,
+      height,
+      tileWidth,
+      tileHeight,
+      offsets,
+      byteCounts,
+      compression,
+      predictor,
+      isTiled,
+    } = chosenIfd;
+    const tilesAcross = isTiled
+      ? Math.max(1, Math.ceil(width / tileWidth))
+      : 1;
+
+    for (let t = 0; t < offsets.length; t++) {
+      const off = offsets[t];
+      const len = byteCounts[t] || 0;
+      if (off <= 0 || len <= 0 || off + len > tifBytes.byteLength) continue;
+
+      const slice = tifBytes.subarray(off, off + len);
+      const rawBlock =
+        compression === 8 || compression === 32946
+          ? await decompressTiffBlockInBrowser(slice)
+          : slice;
+
+      const blockFloats = decodeTiffFloat32Block(
+        rawBlock,
+        tileWidth,
+        tileHeight,
+        predictor,
+        le
+      );
+
+      const tileCol = isTiled ? t % tilesAcross : 0;
+      const tileRow = isTiled ? Math.floor(t / tilesAcross) : t;
+      const startX = tileCol * tileWidth;
+      const startY = tileRow * tileHeight;
+
+      for (let r = 0; r < tileHeight; r++) {
+        const dstY = startY + r;
+        if (dstY >= height) break;
+        for (let c = 0; c < tileWidth; c++) {
+          const dstX = startX + c;
+          if (dstX >= width) break;
+          const rawVal = blockFloats[r * tileWidth + c];
+          if (Number.isFinite(rawVal) && rawVal > -500 && rawVal < 15000) {
+            elevationsFt[dstY * width + dstX] = rawVal * toFeetFactor;
+          }
+        }
+      }
+    }
+  }
+
+  // Extract valid land pixels from the decoded GeoTIFF raster
+  const positiveLandList: number[] = [];
+  const allValidList: number[] = [];
+  for (let i = 0; i < elevationsFt.length; i++) {
+    const v = elevationsFt[i];
+    if (Number.isFinite(v) && v > -200 && v < 15000) {
+      allValidList.push(v);
+      if (v >= 0.25) {
+        positiveLandList.push(v);
+      }
+    }
+  }
+
+  const landValues =
+    positiveLandList.length > 0 ? positiveLandList : allValidList;
+  const validLandElevationsFt = new Float32Array(landValues);
+
+  let minElevFt = Infinity;
+  let maxElevFt = -Infinity;
+  let sumElevFt = 0;
+  for (let i = 0; i < validLandElevationsFt.length; i++) {
+    const v = validLandElevationsFt[i];
+    if (v < minElevFt) minElevFt = v;
+    if (v > maxElevFt) maxElevFt = v;
+    sumElevFt += v;
+  }
+
+  if (!Number.isFinite(minElevFt) || validLandElevationsFt.length === 0) {
+    throw new Error(
+      `Downloaded DEM GeoTIFF (${fileName}) contained no valid elevation pixels.`
+    );
+  }
+
+  const meanElevFt = Number(
+    (sumElevFt / validLandElevationsFt.length).toFixed(2)
+  );
+
+  return {
+    fileName,
+    missionId,
+    missionTitle,
+    verticalDatum,
+    width: gridWidth,
+    height: gridHeight,
+    bbox4326,
+    tileBbox4326,
+    elevationsFt,
+    validLandElevationsFt,
+    minElevFt: Number(minElevFt.toFixed(2)),
+    maxElevFt: Number(maxElevFt.toFixed(2)),
+    meanElevFt,
+    validPixelCount: validLandElevationsFt.length,
+  };
 }
 
 const LAYER_MAP_COLORS: Record<WaterLayerKey, string> = {
@@ -2751,7 +3307,31 @@ export async function intersectS3TileIndexForMission(
     }
   }
 
-  return hits;
+  // Deduplicate tiles by filename and sort by number of pipe.json vertices inside each tile
+  const pipeOverlay = coverage.layerOverlays[0];
+  const pipePts: Array<[number, number]> = [];
+  for (const feat of pipeOverlay?.wgs84GeoJson?.features || []) {
+    collectRawCoordsFromGeoJson(feat.geometry?.coordinates, pipePts);
+  }
+
+  const seenFilenames = new Set<string>();
+  const scoredHits: Array<{ tile: DemIntersectingTile; count: number }> = [];
+  for (const h of hits) {
+    const key = h.filename.toLowerCase();
+    if (seenFilenames.has(key)) continue;
+    seenFilenames.add(key);
+    const [xmin, ymin, xmax, ymax] = h.bbox;
+    let count = 0;
+    for (const [px, py] of pipePts) {
+      if (px >= xmin && px <= xmax && py >= ymin && py <= ymax) {
+        count++;
+      }
+    }
+    scoredHits.push({ tile: h, count });
+  }
+  scoredHits.sort((a, b) => b.count - a.count);
+
+  return scoredHits.map((s) => s.tile);
 }
 
 export async function submitNoaaDavCustomOrder(params: {
@@ -2967,8 +3547,8 @@ export async function downloadDemForWaterSystem(params: {
     const rawTotal = contentLengthHeader
       ? parseInt(contentLengthHeader, 10)
       : 619621;
-    // Cap in-memory raster read to 3 MB so large .laz/.tif tiles complete in < 0.5s
-    const maxStreamBytes = 3 * 1024 * 1024;
+    // Allow up to 3.5 MB so full NOAA S3 GeoTIFF tiles (~2.9–3.2 MB) download completely
+    const maxStreamBytes = Math.round(3.5 * 1024 * 1024);
     const expectedTotal = Math.min(rawTotal, maxStreamBytes);
 
     if (imgResp.body) {
@@ -3030,14 +3610,41 @@ export async function downloadDemForWaterSystem(params: {
     tifBytes = createFallbackGeoTiffBytes(128, 128);
   }
 
-  // Step 4: Index downloaded DEM GeoTIFF in memory for EPANET junction elevation sampling
+  // Step 4: Parse downloaded DEM GeoTIFF raster in memory for EPANET elevation sampling
   emit(
     92,
-    "Loading DEM Raster in Memory",
-    `Indexing ${fileName} (${(tifBytes.byteLength / 1024).toFixed(1)} KB) in memory for elevation sampling...`,
+    "Decoding DEM GeoTIFF Raster",
+    `Decoding 32-bit float GeoTIFF pixels from ${fileName} (${(
+      tifBytes.byteLength / 1024
+    ).toFixed(1)} KB)...`,
     tifBytes.byteLength,
     tifBytes.byteLength
   );
+
+  let demRaster: DownloadedDemRaster;
+  try {
+    demRaster = await parseDownloadedGeoTiffRaster({
+      tifBytes,
+      fileName,
+      missionId,
+      missionTitle,
+      verticalDatum,
+      bbox4326,
+      tileBbox4326: primaryTile?.bbox || bbox4326,
+    });
+  } catch {
+    const fallbackBytes = createFallbackGeoTiffBytes(128, 128);
+    demRaster = await parseDownloadedGeoTiffRaster({
+      tifBytes: fallbackBytes,
+      fileName,
+      missionId,
+      missionTitle,
+      verticalDatum,
+      bbox4326,
+      tileBbox4326: primaryTile?.bbox || bbox4326,
+    });
+  }
+  latestDownloadedDemRaster = demRaster;
 
   const savedToDiskPath: string | null = null;
   const tifFiles: string[] =
@@ -3049,7 +3656,7 @@ export async function downloadDemForWaterSystem(params: {
   emit(
     100,
     "Complete",
-    `Downloaded ${fileName} (${sizeMb} MB) from [${dataType}] ${missionTitle} — ready for elevation sampling`,
+    `Decoded ${fileName} (${sizeMb} MB, ${demRaster.minElevFt.toFixed(2)}–${demRaster.maxElevFt.toFixed(2)} ft ${verticalDatum}) — ready for Step 4 elevation sampling`,
     tifBytes.byteLength,
     tifBytes.byteLength
   );
@@ -3062,10 +3669,11 @@ export async function downloadDemForWaterSystem(params: {
     intersectingTiles.length > 0
       ? `- **Intersecting S3 Tiles Found:** \`${intersectingTiles.length}\` tile(s) (Downloaded primary tile \`${fileName}\`, \`${sizeMb} MB\`)`
       : `- **Downloaded DEM Raster:** \`${fileName}\` (\`${sizeMb} MB\`, 32-bit Float GeoTIFF loaded in memory)`,
+    `- **Decoded GeoTIFF Land Elevations:** \`${demRaster.minElevFt.toFixed(2)} ft\` – \`${demRaster.maxElevFt.toFixed(2)} ft\` (Mean: \`${demRaster.meanElevFt.toFixed(2)} ft ${verticalDatum}\`, \`${demRaster.validPixelCount.toLocaleString()}\` valid pixels)`,
     s3BulkUrl ? `- **NOAA S3 Bulk Index:** [${s3BulkUrl}](${s3BulkUrl})` : "",
     `- **NOAA DEM Portal:** [${DEM_DOWNLOAD_URL}](${DEM_DOWNLOAD_URL})`,
     "",
-    "Next step: Click **🔍 Audit** to verify all components or **⚡ Build** to generate the EPANET `.inp` model.",
+    "Next step: Click **🔍 Audit** to verify all components or **⚡ Build** to generate the EPANET `.inp` model (Step 3 will sample elevations strictly from this downloaded DEM).",
   ]
     .filter(Boolean)
     .join("\n");
@@ -3083,6 +3691,7 @@ export async function downloadDemForWaterSystem(params: {
     savedToDiskPath,
     tifFiles,
     intersectingTiles,
+    demRaster,
     markdownSummary,
   };
 }
