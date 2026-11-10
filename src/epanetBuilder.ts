@@ -631,23 +631,116 @@ export function auditWaterSystem(
   };
 }
 
+function wgs84ToFloridaStatePlaneFeet(
+  lonDeg: number,
+  latDeg: number,
+  isWest: boolean = true
+): [number, number] {
+  // Exact forward Transverse Mercator for NAD83 Florida West (EPSG:2882, lon0=-82) or Florida East (EPSG:2881, lon0=-81) in US survey feet (ftUS)
+  const a = 6378137.0;
+  const f = 1 / 298.257222101;
+  const e2 = 2 * f - f * f;
+  const ep2 = e2 / (1 - e2);
+  const k0 = 0.999941177;
+  const lat0 = (24.333333333333332 * Math.PI) / 180;
+  const lon0 = ((isWest ? -82.0 : -81.0) * Math.PI) / 180;
+  const phi = (latDeg * Math.PI) / 180;
+  const lam = (lonDeg * Math.PI) / 180;
+
+  const calcMeridionalArc = (p: number) =>
+    a *
+    ((1 - e2 / 4 - (3 * e2 * e2) / 64 - (5 * e2 * e2 * e2) / 256) * p -
+      ((3 * e2) / 8 + (3 * e2 * e2) / 32 + (45 * e2 * e2 * e2) / 1024) *
+        Math.sin(2 * p) +
+      ((15 * e2 * e2) / 256 + (45 * e2 * e2 * e2) / 1024) * Math.sin(4 * p) -
+      ((35 * e2 * e2 * e2) / 3072) * Math.sin(6 * p));
+
+  const M0 = calcMeridionalArc(lat0);
+  const M = calcMeridionalArc(phi);
+  const N = a / Math.sqrt(1 - e2 * Math.sin(phi) * Math.sin(phi));
+  const T = Math.tan(phi) * Math.tan(phi);
+  const C = ep2 * Math.cos(phi) * Math.cos(phi);
+  const A = (lam - lon0) * Math.cos(phi);
+
+  const xM =
+    200000.0001016 +
+    k0 *
+      N *
+      (A +
+        ((1 - T + C) * Math.pow(A, 3)) / 6 +
+        ((5 - 18 * T + T * T + 72 * C - 58 * ep2) * Math.pow(A, 5)) / 120);
+  const yM =
+    k0 *
+    (M -
+      M0 +
+      N *
+        Math.tan(phi) *
+        ((A * A) / 2 +
+          ((5 - T + 9 * C + 4 * C * C) * Math.pow(A, 4)) / 24 +
+          ((61 - 58 * T + T * T + 600 * C - 330 * ep2) * Math.pow(A, 6)) /
+            720));
+
+  const mToFt = 3937 / 1200;
+  return [Number((xM * mToFt).toFixed(2)), Number((yM * mToFt).toFixed(2))];
+}
+
+function wgs84ToEpsg2264Feet(lonDeg: number, latDeg: number): [number, number] {
+  // Exact forward Lambert Conformal Conic for NAD83 North Carolina State Plane (ftUS, EPSG:2264)
+  // Matches proj4: +proj=lcc +lat_1=36.16666666666666 +lat_2=34.33333333333334 +lat_0=33.75 +lon_0=-79 +x_0=609601.2192024384 +y_0=0 +datum=NAD83 +units=us-ft
+  const a = 6378137.0;
+  const f = 1 / 298.257222101;
+  const e = Math.sqrt(2 * f - f * f);
+  const phi1 = (36.16666666666666 * Math.PI) / 180;
+  const phi2 = (34.33333333333334 * Math.PI) / 180;
+  const phi0 = (33.75 * Math.PI) / 180;
+  const lam0 = (-79.0 * Math.PI) / 180;
+  const phi = (latDeg * Math.PI) / 180;
+  const lam = (lonDeg * Math.PI) / 180;
+
+  const calcM = (p: number) =>
+    Math.cos(p) / Math.sqrt(1 - Math.pow(e * Math.sin(p), 2));
+  const calcT = (p: number) =>
+    Math.tan(Math.PI / 4 - p / 2) /
+    Math.pow((1 - e * Math.sin(p)) / (1 + e * Math.sin(p)), e / 2);
+
+  const m1 = calcM(phi1);
+  const m2 = calcM(phi2);
+  const t1 = calcT(phi1);
+  const t2 = calcT(phi2);
+  const t0 = calcT(phi0);
+  const t = calcT(phi);
+  const n = (Math.log(m1) - Math.log(m2)) / (Math.log(t1) - Math.log(t2));
+  const F = m1 / (n * Math.pow(t1, n));
+  const rho0 = a * F * Math.pow(t0, n);
+  const rho = a * F * Math.pow(t, n);
+  const theta = n * (lam - lam0);
+
+  const xM = rho * Math.sin(theta) + 609601.2192024384;
+  const yM = rho0 - rho * Math.cos(theta);
+  const mToFt = 3937 / 1200;
+  return [Number((xM * mToFt).toFixed(2)), Number((yM * mToFt).toFixed(2))];
+}
+
 function toStatePlaneFeet(coord: [number, number]): [number, number] {
-  const [x, y] = coord;
+  let [x, y] = coord;
+
+  // Handle Web Mercator (EPSG:3857) meters if present
+  if (x < -5000000 && x > -15000000 && y > 2000000 && y < 7000000) {
+    const lon = (x * 180) / 20037508.34;
+    const lat =
+      (Math.atan(Math.exp((y * Math.PI) / 20037508.34)) * 360) / Math.PI - 90;
+    x = lon;
+    y = lat;
+  }
+
   if (Math.abs(x) <= 180 && Math.abs(y) <= 90) {
     // Florida coordinates (e.g. Gasparilla Island, FL in NAD83 Florida West ftUS EPSG:2882)
     if (x >= -88.0 && x <= -79.5 && y >= 24.0 && y <= 31.5) {
-      const refLon = -82.0;
-      const refLat = 24.3333333333333;
-      const xFt = 656166.67 + (x - refLon) * 328000;
-      const yFt = (y - refLat) * 364100;
-      return [Number(xFt.toFixed(2)), Number(yFt.toFixed(2))];
+      const isWest = x <= -81.3;
+      return wgs84ToFloridaStatePlaneFeet(x, y, isWest);
     }
-    // Default NAD83 NC State Plane Feet (EPSG:2264)
-    const refLon = -79.18;
-    const refLat = 35.48;
-    const xFt = 2015000 + (x - refLon) * 298000;
-    const yFt = 745000 + (y - refLat) * 364000;
-    return [Number(xFt.toFixed(2)), Number(yFt.toFixed(2))];
+    // Exact NAD83 North Carolina State Plane Feet (EPSG:2264)
+    return wgs84ToEpsg2264Feet(x, y);
   }
   return [Number(x.toFixed(2)), Number(y.toFixed(2))];
 }
@@ -724,27 +817,18 @@ export function setLatestDownloadedDemRaster(
 
 function statePlaneFeetToWgs84FromLinear(
   pt: [number, number],
-  sourceCrs: string,
+  _sourceCrs: string,
   targetCrs: string,
   demBbox4326?: [number, number, number, number]
 ): [number, number] {
   if (Math.abs(pt[0]) <= 180 && Math.abs(pt[1]) <= 90) {
     return [pt[0], pt[1]];
   }
-  const srcNorm = sourceCrs.toUpperCase();
-  if (srcNorm.includes("4326") || srcNorm.includes("6318")) {
-    // Invert the linear projection applied in toStatePlaneFeet()
-    const isFlorida =
-      (demBbox4326 && demBbox4326[1] >= 24.0 && demBbox4326[3] <= 31.5) ||
-      pt[0] < 1300000;
-    if (isFlorida) {
-      const lon = -82.0 + (pt[0] - 656166.67) / 328000;
-      const lat = 24.3333333333333 + pt[1] / 364100;
-      return [lon, lat];
-    }
-    const lon = -79.18 + (pt[0] - 2015000) / 298000;
-    const lat = 35.48 + (pt[1] - 745000) / 364000;
-    return [lon, lat];
+  const isFlorida =
+    Boolean(demBbox4326 && demBbox4326[1] >= 24.0 && demBbox4326[3] <= 31.5) ||
+    (pt[0] >= 450000 && pt[0] <= 1000000 && pt[1] >= 650000 && pt[1] <= 1300000);
+  if (isFlorida && !targetCrs.includes("2881") && !targetCrs.includes("2882")) {
+    return convertPointToWgs84(pt, "EPSG:2882");
   }
   return convertPointToWgs84(pt, targetCrs);
 }
