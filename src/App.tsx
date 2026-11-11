@@ -7,6 +7,7 @@ import {
   ChatMessage,
   ConversationThread,
   ExecutionMode,
+  deleteInpFileFromAmplifyStorage,
   fetchInpFileContentFromAmplifyStorage,
   listInpFilesInAmplifyStorage,
   loadInpFromAmplifyBackend,
@@ -473,6 +474,17 @@ function App({ user, signOut }: AppProps) {
   const [downloadingStoredFileName, setDownloadingStoredFileName] = useState<
     string | null
   >(null);
+  const [deletingStoredFileName, setDeletingStoredFileName] = useState<
+    string | null
+  >(null);
+  const [isEditingInp, setIsEditingInp] = useState<boolean>(false);
+  const [editingInpFileName, setEditingInpFileName] = useState<string>("");
+  const [editingInpContent, setEditingInpContent] = useState<string>("");
+  const [isSavingEditedInp, setIsSavingEditedInp] = useState<boolean>(false);
+  const [editingLayerKey, setEditingLayerKey] = useState<WaterLayerKey | null>(
+    null
+  );
+  const [editingLayerText, setEditingLayerText] = useState<string>("");
   const [isBuildingModel, setIsBuildingModel] = useState<boolean>(false);
   const [buildProgressPercent, setBuildProgressPercent] = useState<number>(0);
   const [buildStageText, setBuildStageText] = useState<string>(
@@ -495,6 +507,7 @@ function App({ user, signOut }: AppProps) {
   const picInputRef = useRef<HTMLInputElement | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const folderJsonInputRef = useRef<HTMLInputElement | null>(null);
+  const singleJsonFilesInputRef = useRef<HTMLInputElement | null>(null);
   const inpFileInputRef = useRef<HTMLInputElement | null>(null);
   const lastScannedFolderRef = useRef<string>("");
   const demMapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -676,6 +689,12 @@ function App({ user, signOut }: AppProps) {
   }, [waterJsonFolder]);
 
   useEffect(() => {
+    const isLocalhost =
+      typeof window !== "undefined" &&
+      (window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1");
+    if (!isLocalhost) return;
+
     void (async () => {
       const initial = await scanLocalWaterJsonFolder(waterJsonFolder);
       if (Object.keys(initial).length === 0) {
@@ -1507,6 +1526,47 @@ function App({ user, signOut }: AppProps) {
     }
   }
 
+  function handleDeleteWaterLayer(key: WaterLayerKey, fileName: string) {
+    setWaterLayers((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    if (selectedDataFileKey === key) {
+      setSelectedDataFileKey(null);
+    }
+    if (editingLayerKey === key) {
+      setEditingLayerKey(null);
+      setEditingLayerText("");
+    }
+    setFolderScanStatus(`Deleted "${fileName}" from loaded water system layers`);
+  }
+
+  function handleSaveEditedWaterLayer(key: WaterLayerKey) {
+    const currentLayer = waterLayers[key];
+    if (!currentLayer) return;
+    try {
+      const reparsed = parseWaterJsonFile(
+        currentLayer.fileName,
+        editingLayerText,
+        key
+      );
+      setWaterLayers((prev) => ({ ...prev, [key]: reparsed }));
+      setEditingLayerKey(null);
+      setEditingLayerText("");
+      setUploadError(null);
+      setFolderScanStatus(
+        `Modified and saved "${currentLayer.fileName}" (${reparsed.featureCount} feature(s))`
+      );
+    } catch (err) {
+      setUploadError(
+        err instanceof Error
+          ? err.message
+          : `Invalid GeoJSON/JSON syntax in "${currentLayer.fileName}"`
+      );
+    }
+  }
+
   async function handleSelectStoredInpFile(item: AmplifyStoredInpFile) {
     const content = await fetchInpFileContentFromAmplifyStorage(item);
     if (!content) return;
@@ -1518,7 +1578,124 @@ function App({ user, signOut }: AppProps) {
     );
     setModelName(item.fileName.replace(/\.inp$/i, ""));
     setBuildResult(parsed);
+    setIsEditingInp(false);
     setInpModifiedByBedrockAt(null);
+  }
+
+  async function handleStartEditingInp(item?: AmplifyStoredInpFile) {
+    if (item) {
+      const content =
+        (await fetchInpFileContentFromAmplifyStorage(item)) ||
+        (buildResult &&
+        buildResult.inpFileName.toLowerCase() === item.fileName.toLowerCase()
+          ? buildResult.inpContent
+          : null);
+      if (!content) return;
+      const parsed = recalculateBuildResultFromInp(
+        content,
+        buildResult,
+        item.fileName,
+        targetCrs
+      );
+      setModelName(item.fileName.replace(/\.inp$/i, ""));
+      setBuildResult(parsed);
+      setEditingInpFileName(item.fileName);
+      setEditingInpContent(content);
+      setIsEditingInp(true);
+      return;
+    }
+    if (!buildResult) return;
+    setEditingInpFileName(buildResult.inpFileName);
+    setEditingInpContent(buildResult.inpContent);
+    setIsEditingInp(true);
+  }
+
+  async function handleSaveEditedInp() {
+    if (!editingInpContent.trim()) return;
+    setIsSavingEditedInp(true);
+    try {
+      const cleanFileName = editingInpFileName.trim().toLowerCase().endsWith(".inp")
+        ? editingInpFileName.trim()
+        : `${editingInpFileName.trim().replace(/\.[^.]+$/, "") || "water_distribution_model"}.inp`;
+      const updatedResult = recalculateBuildResultFromInp(
+        editingInpContent,
+        buildResult,
+        cleanFileName,
+        "Modified & Saved to AWS Amplify Storage"
+      );
+      setBuildResult(updatedResult);
+      setModelName(cleanFileName.replace(/\.inp$/i, ""));
+      setIsEditingInp(false);
+
+      await syncInpToAmplifyBackend(
+        cleanFileName,
+        editingInpContent,
+        "Modified in Built Model Editor"
+      );
+      await refreshAmplifyStoredInpFiles();
+
+      const ts = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+      setInpModifiedByBedrockAt(ts);
+      setInpUploadedToBackendAt(
+        `${cleanFileName} modified & saved to AWS Amplify Storage (${ts})`
+      );
+    } finally {
+      setIsSavingEditedInp(false);
+    }
+  }
+
+  async function handleDeleteStoredInpFile(item: AmplifyStoredInpFile) {
+    setDeletingStoredFileName(item.fileName);
+    setUploadError(null);
+    try {
+      await deleteInpFileFromAmplifyStorage(item);
+      const remaining = await listInpFilesInAmplifyStorage();
+      setAmplifyStoredInpFiles(remaining);
+
+      if (
+        buildResult &&
+        buildResult.inpFileName.toLowerCase() === item.fileName.toLowerCase()
+      ) {
+        setIsEditingInp(false);
+        if (remaining.length > 0) {
+          const nextItem = remaining[0];
+          const nextContent =
+            await fetchInpFileContentFromAmplifyStorage(nextItem);
+          if (nextContent) {
+            const parsed = recalculateBuildResultFromInp(
+              nextContent,
+              null,
+              nextItem.fileName,
+              targetCrs
+            );
+            setModelName(nextItem.fileName.replace(/\.inp$/i, ""));
+            setBuildResult(parsed);
+          } else {
+            setBuildResult(null);
+          }
+        } else {
+          setBuildResult(null);
+        }
+      }
+
+      const ts = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+      setInpUploadedToBackendAt(
+        `Deleted ${item.fileName} from AWS Amplify Storage (${ts})`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setUploadError(`Failed to delete "${item.fileName}": ${msg}`);
+    } finally {
+      setDeletingStoredFileName(null);
+    }
   }
 
   async function handleUploadInpFile(file: File) {
@@ -1625,6 +1802,22 @@ function App({ user, signOut }: AppProps) {
     const mentionedStoredInp = amplifyStoredInpFiles.find((item) =>
       lowerPrompt.includes(item.fileName.toLowerCase())
     );
+    if (
+      activeAttachments.length === 0 &&
+      mentionedStoredInp &&
+      (lowerPrompt.startsWith("delete ") ||
+        lowerPrompt.startsWith("remove ") ||
+        lowerPrompt.includes(`delete ${mentionedStoredInp.fileName.toLowerCase()}`) ||
+        lowerPrompt.includes(`remove ${mentionedStoredInp.fileName.toLowerCase()}`))
+    ) {
+      setInput("");
+      await handleDeleteStoredInpFile(mentionedStoredInp);
+      appendAgentConversationPair(
+        trimmed,
+        `### 🗑️ Deleted \`${mentionedStoredInp.fileName}\` from AWS Amplify Storage\n\n- Removed \`${mentionedStoredInp.fileName}\` (\`${mentionedStoredInp.storagePath}\`) from the AWS Amplify backend and storage list.`
+      );
+      return;
+    }
     if (
       mentionedStoredInp &&
       (!currentBuild ||
@@ -2392,11 +2585,32 @@ function App({ user, signOut }: AppProps) {
               <button
                 type="button"
                 className="layer-upload-btn"
+                onClick={() => singleJsonFilesInputRef.current?.click()}
+                title="Upload or replace individual .json / .geojson files"
+              >
+                📄 Upload Files
+              </button>
+              <button
+                type="button"
+                className="layer-upload-btn"
                 onClick={() => folderJsonInputRef.current?.click()}
                 title="Browse local folder for Water System JSON files"
               >
                 📂 Browse
               </button>
+              <input
+                ref={singleJsonFilesInputRef}
+                type="file"
+                multiple
+                accept=".json,.geojson,application/json"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  if (e.target.files) {
+                    void handleUploadWaterJsonFiles(e.target.files);
+                    e.target.value = "";
+                  }
+                }}
+              />
               <input
                 ref={folderJsonInputRef}
                 type="file"
@@ -2466,6 +2680,7 @@ function App({ user, signOut }: AppProps) {
                   (Object.values(waterLayers) as UploadedLayerInfo[]).map(
                     (layer) => {
                       const isExpanded = selectedDataFileKey === layer.key;
+                      const isEditingThisLayer = editingLayerKey === layer.key;
                       return (
                         <div
                           key={layer.key}
@@ -2477,16 +2692,66 @@ function App({ user, signOut }: AppProps) {
                               prev === layer.key ? null : layer.key
                             )
                           }
-                          title="Click to inspect JSON features in this file"
+                          title="Click to inspect or modify JSON features in this file"
                         >
                           <div className="available-data-item-top">
                             <span className="available-data-filename">
                               <span>📄</span>
                               <span>{layer.fileName}</span>
                             </span>
-                            <span className="available-data-type-badge">
-                              {layer.label.replace(/\s*\(.*\)$/, "")}
-                            </span>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "4px",
+                              }}
+                            >
+                              <span className="available-data-type-badge">
+                                {layer.label.replace(/\s*\(.*\)$/, "")}
+                              </span>
+                              <button
+                                type="button"
+                                className="layer-upload-btn"
+                                style={{
+                                  padding: "2px 6px",
+                                  fontSize: "0.68rem",
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedDataFileKey(layer.key);
+                                  if (isEditingThisLayer) {
+                                    setEditingLayerKey(null);
+                                    setEditingLayerText("");
+                                  } else {
+                                    setEditingLayerKey(layer.key);
+                                    setEditingLayerText(layer.rawText);
+                                  }
+                                }}
+                                title={`Modify ${layer.fileName}`}
+                              >
+                                {isEditingThisLayer ? "Cancel" : "✏️ Edit"}
+                              </button>
+                              <button
+                                type="button"
+                                className="layer-upload-btn"
+                                style={{
+                                  padding: "2px 6px",
+                                  fontSize: "0.68rem",
+                                  color: "#dc2626",
+                                  borderColor: "#fca5a5",
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteWaterLayer(
+                                    layer.key,
+                                    layer.fileName
+                                  );
+                                }}
+                                title={`Delete ${layer.fileName}`}
+                              >
+                                🗑 Delete
+                              </button>
+                            </div>
                           </div>
                           <div className="available-data-meta">
                             <span>
@@ -2496,10 +2761,68 @@ function App({ user, signOut }: AppProps) {
                             </span>
                             <span>ID: {layer.standardizedIdRange}</span>
                           </div>
-                          {isExpanded && (
-                            <pre className="available-data-preview">
-                              {layer.rawText.slice(0, 1200)}
-                            </pre>
+                          {isEditingThisLayer ? (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              style={{
+                                marginTop: "6px",
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "6px",
+                              }}
+                            >
+                              <textarea
+                                className="panel-text-input"
+                                style={{
+                                  width: "100%",
+                                  minHeight: "140px",
+                                  fontFamily: "monospace",
+                                  fontSize: "0.72rem",
+                                  resize: "vertical",
+                                }}
+                                value={editingLayerText}
+                                onChange={(e) =>
+                                  setEditingLayerText(e.target.value)
+                                }
+                              />
+                              <div
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "flex-end",
+                                  gap: "6px",
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  className="layer-upload-btn"
+                                  onClick={() => {
+                                    setEditingLayerKey(null);
+                                    setEditingLayerText("");
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  className="epanet-btn build-btn"
+                                  style={{
+                                    padding: "3px 10px",
+                                    fontSize: "0.72rem",
+                                  }}
+                                  onClick={() =>
+                                    handleSaveEditedWaterLayer(layer.key)
+                                  }
+                                >
+                                  💾 Save JSON
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            isExpanded && (
+                              <pre className="available-data-preview">
+                                {layer.rawText.slice(0, 1200)}
+                              </pre>
+                            )
                           )}
                         </div>
                       );
@@ -2870,14 +3193,31 @@ function App({ user, signOut }: AppProps) {
                 <span className="panel-card-title">
                   ⚡ Built Model: {buildResult.inpFileName}
                 </span>
-                <button
-                  type="button"
-                  className="epanet-btn build-btn"
-                  style={{ padding: "4px 10px", fontSize: "0.74rem" }}
-                  onClick={handleDownloadInpFile}
-                >
-                  ⬇ Download .inp
-                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <button
+                    type="button"
+                    className="layer-upload-btn"
+                    style={{ padding: "4px 8px", fontSize: "0.72rem" }}
+                    onClick={() => {
+                      if (isEditingInp) {
+                        setIsEditingInp(false);
+                      } else {
+                        void handleStartEditingInp();
+                      }
+                    }}
+                    title="Modify .inp file content directly and save to AWS Amplify Storage"
+                  >
+                    {isEditingInp ? "Cancel Edit" : "✏️ Modify .inp"}
+                  </button>
+                  <button
+                    type="button"
+                    className="epanet-btn build-btn"
+                    style={{ padding: "4px 10px", fontSize: "0.74rem" }}
+                    onClick={handleDownloadInpFile}
+                  >
+                    ⬇ Download .inp
+                  </button>
+                </div>
               </div>
               {inpModifiedByBedrockAt && (
                 <div
@@ -2887,7 +3227,7 @@ function App({ user, signOut }: AppProps) {
                     fontWeight: 600,
                   }}
                 >
-                  ✨ Modified by AWS Bedrock in Amplify Backend (
+                  ✨ Modified & Synced in AWS Amplify Backend (
                   {inpModifiedByBedrockAt})
                 </div>
               )}
@@ -2900,7 +3240,59 @@ function App({ user, signOut }: AppProps) {
                 <strong>{buildResult.stats.pumps}</strong> · Demand:{" "}
                 <strong>{buildResult.stats.totalDemandGpm} GPM</strong>
               </span>
-              <div className="inp-preview-box">{buildResult.inpContent}</div>
+              {isEditingInp ? (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "8px",
+                    marginTop: "4px",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                    }}
+                  >
+                    <span style={{ fontSize: "0.74rem", fontWeight: 600 }}>
+                      File Name:
+                    </span>
+                    <input
+                      type="text"
+                      className="panel-text-input"
+                      value={editingInpFileName}
+                      onChange={(e) => setEditingInpFileName(e.target.value)}
+                      placeholder="cary.inp"
+                    />
+                    <button
+                      type="button"
+                      className="epanet-btn build-btn"
+                      style={{ padding: "4px 12px", fontSize: "0.74rem" }}
+                      disabled={isSavingEditedInp}
+                      onClick={() => void handleSaveEditedInp()}
+                    >
+                      {isSavingEditedInp
+                        ? "⏳ Saving..."
+                        : "💾 Save to Amplify"}
+                    </button>
+                  </div>
+                  <textarea
+                    className="inp-preview-box"
+                    style={{
+                      width: "100%",
+                      minHeight: "240px",
+                      fontFamily: "monospace",
+                      resize: "vertical",
+                    }}
+                    value={editingInpContent}
+                    onChange={(e) => setEditingInpContent(e.target.value)}
+                  />
+                </div>
+              ) : (
+                <div className="inp-preview-box">{buildResult.inpContent}</div>
+              )}
             </div>
           )}
 
@@ -2929,8 +3321,9 @@ function App({ user, signOut }: AppProps) {
 
             <span className="panel-card-subtitle">
               All EPANET <code>.inp</code> files stored in AWS Amplify Storage (
-              <code>inp-files/</code>). Click <strong>⬇ Download .inp</strong> to
-              save any model directly to your local drive.
+              <code>inp-files/</code>). Click <strong>✏️ Modify</strong> to edit,{" "}
+              <strong>⬇ Download .inp</strong> to save to your drive, or{" "}
+              <strong>🗑 Delete</strong> to remove from AWS Amplify.
             </span>
 
             <div className="available-data-window">
@@ -2955,6 +3348,8 @@ function App({ user, signOut }: AppProps) {
                       item.fileName.toLowerCase();
                     const isDownloading =
                       downloadingStoredFileName === item.fileName;
+                    const isDeleting =
+                      deletingStoredFileName === item.fileName;
                     return (
                       <div
                         key={item.id}
@@ -2974,25 +3369,67 @@ function App({ user, signOut }: AppProps) {
                               </span>
                             )}
                           </span>
-                          <button
-                            type="button"
-                            className="epanet-btn build-btn"
+                          <div
                             style={{
-                              padding: "3px 9px",
-                              fontSize: "0.72rem",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "5px",
                               flexShrink: 0,
                             }}
-                            disabled={isDownloading}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleDownloadStoredInpFile(item);
-                            }}
-                            title={`Download ${item.fileName} from AWS Amplify Storage to your local drive`}
                           >
-                            {isDownloading
-                              ? "⏳ Saving..."
-                              : "⬇ Download .inp"}
-                          </button>
+                            <button
+                              type="button"
+                              className="layer-upload-btn"
+                              style={{
+                                padding: "3px 8px",
+                                fontSize: "0.71rem",
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleStartEditingInp(item);
+                              }}
+                              title={`Modify ${item.fileName} and save to AWS Amplify Storage`}
+                            >
+                              ✏️ Modify
+                            </button>
+                            <button
+                              type="button"
+                              className="epanet-btn build-btn"
+                              style={{
+                                padding: "3px 9px",
+                                fontSize: "0.72rem",
+                                flexShrink: 0,
+                              }}
+                              disabled={isDownloading || isDeleting}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleDownloadStoredInpFile(item);
+                              }}
+                              title={`Download ${item.fileName} from AWS Amplify Storage to your local drive`}
+                            >
+                              {isDownloading
+                                ? "⏳ Saving..."
+                                : "⬇ Download .inp"}
+                            </button>
+                            <button
+                              type="button"
+                              className="layer-upload-btn"
+                              style={{
+                                padding: "3px 8px",
+                                fontSize: "0.71rem",
+                                color: "#dc2626",
+                                borderColor: "#fca5a5",
+                              }}
+                              disabled={isDeleting || isDownloading}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleDeleteStoredInpFile(item);
+                              }}
+                              title={`Delete ${item.fileName} from AWS Amplify Storage`}
+                            >
+                              {isDeleting ? "⏳ Deleting..." : "🗑 Delete"}
+                            </button>
+                          </div>
                         </div>
                         <div className="available-data-meta">
                           <span>

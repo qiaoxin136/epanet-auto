@@ -6,7 +6,11 @@ const schema = a.schema({
     .model({
       content: a.string(),
     })
-    .authorization((allow) => [allow.authenticated(), allow.publicApiKey()]),
+    .authorization((allow) => [
+      allow.guest(),
+      allow.authenticated(),
+      allow.publicApiKey(),
+    ]),
 
   BedrockChatResponse: a.customType({
     reply: a.string().required(),
@@ -32,7 +36,11 @@ const schema = a.schema({
       inpFileName: a.string(),
     })
     .returns(a.ref("BedrockChatResponse"))
-    .authorization((allow) => [allow.authenticated(), allow.publicApiKey()])
+    .authorization((allow) => [
+      allow.guest(),
+      allow.authenticated(),
+      allow.publicApiKey(),
+    ])
     .handler(a.handler.function(bedrockChat)),
 });
 

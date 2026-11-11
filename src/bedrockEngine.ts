@@ -1,5 +1,5 @@
 import { generateClient } from "aws-amplify/data";
-import { downloadData, list, uploadData } from "aws-amplify/storage";
+import { downloadData, list, remove, uploadData } from "aws-amplify/storage";
 import outputs from "../amplify_outputs.json";
 import { extractPdfContent } from "./pdfExtractor";
 
@@ -43,6 +43,9 @@ interface AskGpt6SolClient {
       }>;
       update: (args: { id: string; content: string }) => Promise<{
         data?: { id: string; content?: string | null } | null;
+      }>;
+      delete: (args: { id: string }) => Promise<{
+        data?: { id: string } | null;
       }>;
     };
   };
@@ -300,7 +303,10 @@ async function prepareMessagesWithPdfExtraction(
 
 const AMPLIFY_ACTIVE_INP_RECORD_ID = "epanet-active-inp-v1";
 const AMPLIFY_INP_FILE_PREFIX = "epanet-inp-file::";
+const AMPLIFY_INP_CHUNK_PREFIX = "epanet-inp-chunk::";
+const MAX_SINGLE_TODO_INP_CHARS = 280000;
 const LOCAL_STORAGE_INP_CACHE_KEY = "epanet-amplify-storage-inp-files-v1";
+const LOCAL_STORAGE_DELETED_INP_KEY = "epanet-amplify-deleted-inp-files-v1";
 
 export interface AmplifyStoredInpFile {
   id: string;
@@ -310,6 +316,197 @@ export interface AmplifyStoredInpFile {
   updatedAt: string;
   source: string;
   inpContent?: string;
+}
+
+interface AppSyncTodoRecord {
+  id: string;
+  content?: string | null;
+  updatedAt?: string;
+}
+
+function getAppSyncEndpointConfig(): { url: string; apiKey: string } | null {
+  const dataCfg = (
+    outputs as { data?: { url?: string; api_key?: string } }
+  )?.data;
+  if (dataCfg?.url && dataCfg?.api_key) {
+    return { url: dataCfg.url, apiKey: dataCfg.api_key };
+  }
+  return null;
+}
+
+async function executeAppSyncGraphql<TData>(
+  query: string,
+  variables?: Record<string, unknown>,
+  signal?: AbortSignal
+): Promise<TData | null> {
+  const cfg = getAppSyncEndpointConfig();
+  if (!cfg) return null;
+  const resp = await fetch(cfg.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": cfg.apiKey,
+    },
+    body: JSON.stringify({ query, variables: variables || {} }),
+    signal,
+  });
+  if (!resp.ok) {
+    throw new Error(`AppSync HTTP ${resp.status}`);
+  }
+  const json = (await resp.json()) as {
+    data?: TData;
+    errors?: Array<{ message: string }>;
+  };
+  if (json.errors?.length && !json.data) {
+    throw new Error(json.errors.map((e) => e.message).join("; "));
+  }
+  return json.data ?? null;
+}
+
+async function appSyncGetTodo(id: string): Promise<AppSyncTodoRecord | null> {
+  try {
+    const data = await executeAppSyncGraphql<{
+      getTodo?: AppSyncTodoRecord | null;
+    }>(
+      `query GetTodo($id: ID!) {
+        getTodo(id: $id) {
+          id
+          content
+          updatedAt
+        }
+      }`,
+      { id }
+    );
+    if (data?.getTodo) return data.getTodo;
+  } catch {
+    // Fallback to Amplify Data client below
+  }
+  try {
+    const client = generateClient() as unknown as AskGpt6SolClient;
+    const res = await client.models?.Todo?.get({ id });
+    return res?.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function appSyncListTodos(
+  limit: number = 150
+): Promise<AppSyncTodoRecord[]> {
+  try {
+    const data = await executeAppSyncGraphql<{
+      listTodos?: { items?: Array<AppSyncTodoRecord | null> | null } | null;
+    }>(
+      `query ListTodos($limit: Int) {
+        listTodos(limit: $limit) {
+          items {
+            id
+            content
+            updatedAt
+          }
+        }
+      }`,
+      { limit }
+    );
+    const items = (data?.listTodos?.items || []).filter(
+      (item): item is AppSyncTodoRecord => Boolean(item && item.id)
+    );
+    if (items.length > 0 || data?.listTodos) {
+      return items;
+    }
+  } catch {
+    // Fallback to Amplify Data client below
+  }
+  try {
+    const client = generateClient() as unknown as AskGpt6SolClient;
+    const res = await client.models?.Todo?.list({ limit });
+    return (res?.data || []).filter((item): item is AppSyncTodoRecord =>
+      Boolean(item && item.id)
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function appSyncUpsertTodo(id: string, content: string): Promise<boolean> {
+  try {
+    const existing = await appSyncGetTodo(id);
+    if (existing?.id) {
+      const updated = await executeAppSyncGraphql<{
+        updateTodo?: { id: string } | null;
+      }>(
+        `mutation UpdateTodo($input: UpdateTodoInput!) {
+          updateTodo(input: $input) {
+            id
+            updatedAt
+          }
+        }`,
+        { input: { id, content } }
+      );
+      if (updated?.updateTodo?.id) return true;
+    } else {
+      const created = await executeAppSyncGraphql<{
+        createTodo?: { id: string } | null;
+      }>(
+        `mutation CreateTodo($input: CreateTodoInput!) {
+          createTodo(input: $input) {
+            id
+            updatedAt
+          }
+        }`,
+        { input: { id, content } }
+      );
+      if (created?.createTodo?.id) return true;
+    }
+  } catch {
+    // Fallback to Amplify Data client below
+  }
+  try {
+    const client = generateClient() as unknown as AskGpt6SolClient;
+    const todoModel = client.models?.Todo;
+    if (!todoModel) return false;
+    const existing = await todoModel.get({ id });
+    if (existing?.data?.id) {
+      await todoModel.update({ id, content });
+    } else {
+      await todoModel.create({ id, content });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function appSyncDeleteTodo(id: string): Promise<boolean> {
+  let deleted = false;
+  try {
+    const res = await executeAppSyncGraphql<{
+      deleteTodo?: { id: string } | null;
+    }>(
+      `mutation DeleteTodo($input: DeleteTodoInput!) {
+        deleteTodo(input: $input) {
+          id
+        }
+      }`,
+      { input: { id } }
+    );
+    if (res?.deleteTodo?.id) {
+      deleted = true;
+    }
+  } catch {
+    // Also try Amplify Data client below
+  }
+  try {
+    const client = generateClient() as unknown as AskGpt6SolClient;
+    const todoModel = client.models?.Todo;
+    if (todoModel?.delete) {
+      await todoModel.delete({ id });
+      deleted = true;
+    }
+  } catch {
+    // Ignore if already deleted
+  }
+  return deleted;
 }
 
 export function isAmplifyStorageBucketConfigured(): boolean {
@@ -325,13 +522,51 @@ function normalizeInpFileName(fileName: string): string {
     : `${trimmed.replace(/\.[^.]+$/, "")}.inp`;
 }
 
+function readDeletedInpNamesSet(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(LOCAL_STORAGE_DELETED_INP_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? new Set(parsed.map((n) => String(n).toLowerCase()))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function markInpFileDeletedLocally(fileName: string, isDeleted: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    const set = readDeletedInpNamesSet();
+    const key = normalizeInpFileName(fileName).toLowerCase();
+    if (isDeleted) {
+      set.add(key);
+    } else {
+      set.delete(key);
+    }
+    window.localStorage.setItem(
+      LOCAL_STORAGE_DELETED_INP_KEY,
+      JSON.stringify(Array.from(set))
+    );
+  } catch {
+    // Ignore storage issues
+  }
+}
+
 function readLocalInpStorageCache(): AmplifyStoredInpFile[] {
   if (typeof window === "undefined") return [];
   try {
+    const deletedSet = readDeletedInpNamesSet();
     const raw = window.localStorage.getItem(LOCAL_STORAGE_INP_CACHE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as AmplifyStoredInpFile[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as AmplifyStoredInpFile[]).filter(
+      (item) =>
+        item?.fileName && !deletedSet.has(item.fileName.toLowerCase())
+    );
   } catch {
     return [];
   }
@@ -340,6 +575,7 @@ function readLocalInpStorageCache(): AmplifyStoredInpFile[] {
 function upsertLocalInpStorageCache(entry: AmplifyStoredInpFile): void {
   if (typeof window === "undefined") return;
   try {
+    markInpFileDeletedLocally(entry.fileName, false);
     const current = readLocalInpStorageCache().filter(
       (item) => item.fileName.toLowerCase() !== entry.fileName.toLowerCase()
     );
@@ -348,6 +584,44 @@ function upsertLocalInpStorageCache(entry: AmplifyStoredInpFile): void {
   } catch {
     // Ignore storage quota issues
   }
+}
+
+function removeLocalInpStorageCache(fileName: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    const cleanKey = normalizeInpFileName(fileName).toLowerCase();
+    markInpFileDeletedLocally(cleanKey, true);
+    const current = readLocalInpStorageCache().filter(
+      (item) => item.fileName.toLowerCase() !== cleanKey
+    );
+    window.localStorage.setItem(
+      LOCAL_STORAGE_INP_CACHE_KEY,
+      JSON.stringify(current)
+    );
+  } catch {
+    // Ignore storage issues
+  }
+}
+
+async function fetchChunkedInpContent(
+  cleanFileName: string,
+  chunkCount: number
+): Promise<string | null> {
+  if (chunkCount <= 0) return null;
+  const parts: string[] = [];
+  for (let i = 0; i < chunkCount; i++) {
+    const chunkId = `${AMPLIFY_INP_CHUNK_PREFIX}${cleanFileName}::${i}`;
+    const rec = await appSyncGetTodo(chunkId);
+    if (!rec?.content) return null;
+    try {
+      const parsed = JSON.parse(rec.content) as { chunkContent?: string };
+      if (typeof parsed.chunkContent !== "string") return null;
+      parts.push(parsed.chunkContent);
+    } catch {
+      return null;
+    }
+  }
+  return parts.join("");
 }
 
 export async function syncInpToAmplifyBackend(
@@ -390,9 +664,7 @@ export async function syncInpToAmplifyBackend(
 
   if (isAmplifyBackendConfigured()) {
     try {
-      const client = generateClient() as unknown as AskGpt6SolClient;
-      const todoModel = client.models?.Todo;
-      if (todoModel) {
+      if (inpContent.length <= MAX_SINGLE_TODO_INP_CHARS) {
         const payload = JSON.stringify({
           type: "EPANET_INP",
           fileName: cleanFileName,
@@ -400,37 +672,59 @@ export async function syncInpToAmplifyBackend(
           sizeBytes: inpContent.length,
           source: sourceLabel,
           inpContent,
+          isChunked: false,
+          chunkCount: 0,
           updatedAt: nowIso,
         });
 
-        const existingActive = await todoModel.get({
-          id: AMPLIFY_ACTIVE_INP_RECORD_ID,
-        });
-        if (existingActive?.data?.id) {
-          await todoModel.update({
-            id: AMPLIFY_ACTIVE_INP_RECORD_ID,
-            content: payload,
-          });
-        } else {
-          await todoModel.create({
-            id: AMPLIFY_ACTIVE_INP_RECORD_ID,
-            content: payload,
-          });
+        const okActive = await appSyncUpsertTodo(
+          AMPLIFY_ACTIVE_INP_RECORD_ID,
+          payload
+        );
+        const okNamed = await appSyncUpsertTodo(recordId, payload);
+        if (okActive || okNamed) syncedCloud = true;
+      } else {
+        const chunks: string[] = [];
+        for (
+          let offset = 0;
+          offset < inpContent.length;
+          offset += MAX_SINGLE_TODO_INP_CHARS
+        ) {
+          chunks.push(
+            inpContent.slice(offset, offset + MAX_SINGLE_TODO_INP_CHARS)
+          );
         }
 
-        const existingNamed = await todoModel.get({ id: recordId });
-        if (existingNamed?.data?.id) {
-          await todoModel.update({
-            id: recordId,
-            content: payload,
+        for (let idx = 0; idx < chunks.length; idx++) {
+          const chunkId = `${AMPLIFY_INP_CHUNK_PREFIX}${cleanFileName}::${idx}`;
+          const chunkPayload = JSON.stringify({
+            type: "EPANET_INP_CHUNK",
+            fileName: cleanFileName,
+            chunkIndex: idx,
+            chunkCount: chunks.length,
+            chunkContent: chunks[idx],
+            updatedAt: nowIso,
           });
-        } else {
-          await todoModel.create({
-            id: recordId,
-            content: payload,
-          });
+          await appSyncUpsertTodo(chunkId, chunkPayload);
         }
-        syncedCloud = true;
+
+        const manifestPayload = JSON.stringify({
+          type: "EPANET_INP",
+          fileName: cleanFileName,
+          storagePath,
+          sizeBytes: inpContent.length,
+          source: sourceLabel,
+          isChunked: true,
+          chunkCount: chunks.length,
+          updatedAt: nowIso,
+        });
+
+        const okActive = await appSyncUpsertTodo(
+          AMPLIFY_ACTIVE_INP_RECORD_ID,
+          manifestPayload
+        );
+        const okNamed = await appSyncUpsertTodo(recordId, manifestPayload);
+        if (okActive || okNamed) syncedCloud = true;
       }
     } catch {
       // Keep local cache entry
@@ -440,58 +734,145 @@ export async function syncInpToAmplifyBackend(
   return syncedCloud;
 }
 
-export async function listInpFilesInAmplifyStorage(): Promise<
-  AmplifyStoredInpFile[]
-> {
-  const byName = new Map<string, AmplifyStoredInpFile>();
+export async function deleteInpFileFromAmplifyStorage(
+  itemOrFileName: AmplifyStoredInpFile | string
+): Promise<boolean> {
+  const rawName =
+    typeof itemOrFileName === "string"
+      ? itemOrFileName
+      : itemOrFileName.fileName;
+  const cleanFileName = normalizeInpFileName(rawName);
+  const cleanLower = cleanFileName.toLowerCase();
+  const recordId = `${AMPLIFY_INP_FILE_PREFIX}${cleanFileName}`;
+  const storagePath =
+    typeof itemOrFileName === "string"
+      ? `inp-files/${cleanFileName}`
+      : itemOrFileName.storagePath || `inp-files/${cleanFileName}`;
 
-  for (const cached of readLocalInpStorageCache()) {
-    byName.set(cached.fileName.toLowerCase(), cached);
+  removeLocalInpStorageCache(cleanFileName);
+
+  if (isAmplifyStorageBucketConfigured()) {
+    try {
+      await remove({ path: storagePath });
+    } catch {
+      // Ignore if S3 object does not exist
+    }
   }
 
   if (isAmplifyBackendConfigured()) {
     try {
-      const client = generateClient() as unknown as AskGpt6SolClient;
-      const todoModel = client.models?.Todo;
-      if (todoModel?.list) {
-        const res = await todoModel.list({ limit: 100 });
-        for (const item of res?.data || []) {
-          if (!item?.content) continue;
+      await appSyncDeleteTodo(recordId);
+      if (
+        typeof itemOrFileName !== "string" &&
+        itemOrFileName.id &&
+        itemOrFileName.id !== recordId
+      ) {
+        await appSyncDeleteTodo(itemOrFileName.id);
+      }
+
+      const allTodos = await appSyncListTodos(200);
+      for (const todo of allTodos) {
+        if (!todo?.id) continue;
+        const idLower = todo.id.toLowerCase();
+        if (
+          idLower === recordId.toLowerCase() ||
+          idLower.startsWith(
+            `${AMPLIFY_INP_CHUNK_PREFIX}${cleanFileName}::`.toLowerCase()
+          )
+        ) {
+          await appSyncDeleteTodo(todo.id);
+          continue;
+        }
+        if (todo.content) {
           try {
-            const parsed = JSON.parse(item.content) as {
+            const parsed = JSON.parse(todo.content) as {
               type?: string;
               fileName?: string;
-              storagePath?: string;
-              sizeBytes?: number;
-              source?: string;
-              inpContent?: string;
-              updatedAt?: string;
             };
-            if (parsed.type === "EPANET_INP" && parsed.inpContent) {
-              const cleanName = normalizeInpFileName(
-                parsed.fileName || "water_distribution_model.inp"
-              );
-              const key = cleanName.toLowerCase();
-              const updatedAt =
-                parsed.updatedAt || item.updatedAt || new Date().toISOString();
-              const prev = byName.get(key);
-              if (!prev || updatedAt >= prev.updatedAt) {
-                const entry: AmplifyStoredInpFile = {
-                  id: item.id || `${AMPLIFY_INP_FILE_PREFIX}${cleanName}`,
-                  fileName: cleanName,
-                  storagePath: parsed.storagePath || `inp-files/${cleanName}`,
-                  sizeBytes: parsed.sizeBytes ?? parsed.inpContent.length,
-                  updatedAt,
-                  source: parsed.source || "AWS Amplify Cloud",
-                  inpContent: parsed.inpContent,
-                };
-                byName.set(key, entry);
+            if (
+              (parsed.type === "EPANET_INP" ||
+                parsed.type === "EPANET_INP_CHUNK") &&
+              parsed.fileName &&
+              normalizeInpFileName(parsed.fileName).toLowerCase() === cleanLower
+            ) {
+              await appSyncDeleteTodo(todo.id);
+            }
+          } catch {
+            // Skip non-JSON records
+          }
+        }
+      }
+    } catch {
+      // Local cache and tombstones are already updated
+    }
+  }
+
+  return true;
+}
+
+export async function listInpFilesInAmplifyStorage(): Promise<
+  AmplifyStoredInpFile[]
+> {
+  const deletedSet = readDeletedInpNamesSet();
+  const byName = new Map<string, AmplifyStoredInpFile>();
+
+  for (const cached of readLocalInpStorageCache()) {
+    if (!deletedSet.has(cached.fileName.toLowerCase())) {
+      byName.set(cached.fileName.toLowerCase(), cached);
+    }
+  }
+
+  if (isAmplifyBackendConfigured()) {
+    try {
+      const items = await appSyncListTodos(150);
+      for (const item of items) {
+        if (!item?.content) continue;
+        try {
+          const parsed = JSON.parse(item.content) as {
+            type?: string;
+            fileName?: string;
+            storagePath?: string;
+            sizeBytes?: number;
+            source?: string;
+            inpContent?: string;
+            isChunked?: boolean;
+            chunkCount?: number;
+            updatedAt?: string;
+          };
+          if (
+            parsed.type === "EPANET_INP" &&
+            (parsed.inpContent || (parsed.isChunked && parsed.chunkCount))
+          ) {
+            const cleanName = normalizeInpFileName(
+              parsed.fileName || "water_distribution_model.inp"
+            );
+            const key = cleanName.toLowerCase();
+            if (deletedSet.has(key)) continue;
+            const updatedAt =
+              parsed.updatedAt || item.updatedAt || new Date().toISOString();
+            const prev = byName.get(key);
+            if (!prev || updatedAt >= prev.updatedAt) {
+              const entry: AmplifyStoredInpFile = {
+                id:
+                  item.id === AMPLIFY_ACTIVE_INP_RECORD_ID
+                    ? `${AMPLIFY_INP_FILE_PREFIX}${cleanName}`
+                    : item.id || `${AMPLIFY_INP_FILE_PREFIX}${cleanName}`,
+                fileName: cleanName,
+                storagePath: parsed.storagePath || `inp-files/${cleanName}`,
+                sizeBytes:
+                  parsed.sizeBytes ?? (parsed.inpContent?.length || 0),
+                updatedAt,
+                source: parsed.source || "AWS Amplify Cloud",
+                inpContent: parsed.inpContent || prev?.inpContent,
+              };
+              byName.set(key, entry);
+              if (entry.inpContent) {
                 upsertLocalInpStorageCache(entry);
               }
             }
-          } catch {
-            // Skip non-JSON Todo entries
           }
+        } catch {
+          // Skip non-JSON Todo entries
         }
       }
     } catch {
@@ -506,6 +887,7 @@ export async function listInpFilesInAmplifyStorage(): Promise<
         const rawName = s3Item.path.replace(/^inp-files\//, "").trim();
         if (!rawName || !rawName.toLowerCase().endsWith(".inp")) continue;
         const key = rawName.toLowerCase();
+        if (deletedSet.has(key)) continue;
         const existing = byName.get(key);
         const s3Updated = s3Item.lastModified
           ? s3Item.lastModified.toISOString()
@@ -553,14 +935,25 @@ export async function fetchInpFileContentFromAmplifyStorage(
 
   if (isAmplifyBackendConfigured()) {
     try {
-      const client = generateClient() as unknown as AskGpt6SolClient;
-      const todoModel = client.models?.Todo;
-      if (todoModel) {
-        const res = await todoModel.get({ id: item.id });
-        const raw = res?.data?.content;
-        if (raw) {
-          const parsed = JSON.parse(raw) as { inpContent?: string };
-          if (parsed.inpContent) return parsed.inpContent;
+      const cleanFileName = normalizeInpFileName(item.fileName);
+      const rec =
+        (await appSyncGetTodo(item.id)) ||
+        (await appSyncGetTodo(`${AMPLIFY_INP_FILE_PREFIX}${cleanFileName}`));
+      const raw = rec?.content;
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          inpContent?: string;
+          isChunked?: boolean;
+          chunkCount?: number;
+          fileName?: string;
+        };
+        if (parsed.inpContent) return parsed.inpContent;
+        if (parsed.isChunked && parsed.chunkCount) {
+          const assembled = await fetchChunkedInpContent(
+            normalizeInpFileName(parsed.fileName || cleanFileName),
+            parsed.chunkCount
+          );
+          if (assembled) return assembled;
         }
       }
     } catch {
@@ -576,6 +969,7 @@ export async function loadInpFromAmplifyBackend(): Promise<{
   inpContent: string;
   updatedAt?: string;
 } | null> {
+  const deletedSet = readDeletedInpNamesSet();
   if (!isAmplifyBackendConfigured()) {
     const cached = readLocalInpStorageCache()[0];
     if (cached?.inpContent) {
@@ -588,26 +982,36 @@ export async function loadInpFromAmplifyBackend(): Promise<{
     return null;
   }
   try {
-    const client = generateClient() as unknown as AskGpt6SolClient;
-    const todoModel = client.models?.Todo;
-    if (!todoModel) return null;
-
-    const existing = await todoModel.get({ id: AMPLIFY_ACTIVE_INP_RECORD_ID });
-    const rawContent = existing?.data?.content;
+    const existing = await appSyncGetTodo(AMPLIFY_ACTIVE_INP_RECORD_ID);
+    const rawContent = existing?.content;
     if (!rawContent) return null;
 
     const parsed = JSON.parse(rawContent) as {
       type?: string;
       fileName?: string;
       inpContent?: string;
+      isChunked?: boolean;
+      chunkCount?: number;
       updatedAt?: string;
     };
-    if (parsed.type === "EPANET_INP" && parsed.inpContent) {
-      return {
-        fileName: parsed.fileName || "water_distribution_model.inp",
-        inpContent: parsed.inpContent,
-        updatedAt: parsed.updatedAt,
-      };
+    if (parsed.type === "EPANET_INP") {
+      const cleanName = normalizeInpFileName(
+        parsed.fileName || "water_distribution_model.inp"
+      );
+      if (deletedSet.has(cleanName.toLowerCase())) {
+        return null;
+      }
+      let content = parsed.inpContent || null;
+      if (!content && parsed.isChunked && parsed.chunkCount) {
+        content = await fetchChunkedInpContent(cleanName, parsed.chunkCount);
+      }
+      if (content) {
+        return {
+          fileName: cleanName,
+          inpContent: content,
+          updatedAt: parsed.updatedAt,
+        };
+      }
     }
     return null;
   } catch {
@@ -1028,20 +1432,71 @@ export async function queryBedrockGpt6Sol(
     }
 
     if (!data && isAmplifyBackendConfigured()) {
-      const client = generateClient() as unknown as AskGpt6SolClient;
-      const response = await client.queries.askGpt6Sol({
-        messagesJson: JSON.stringify(preparedMessages),
-        systemPrompt: effectiveSystemPrompt,
-        temperature,
-        mode: "bedrock",
-        inpContent: compactInpForTransport,
-        inpFileName: activeInpFileName,
-      });
-
-      if (response.errors?.length) {
-        throw new Error(response.errors.map((e) => e.message).join("; "));
+      try {
+        const gqlRes = await executeAppSyncGraphql<{
+          askGpt6Sol?: RawBedrockResponse | null;
+        }>(
+          `query AskGpt6Sol(
+            $messagesJson: String!
+            $systemPrompt: String
+            $temperature: Float
+            $mode: String
+            $inpContent: String
+            $inpFileName: String
+          ) {
+            askGpt6Sol(
+              messagesJson: $messagesJson
+              systemPrompt: $systemPrompt
+              temperature: $temperature
+              mode: $mode
+              inpContent: $inpContent
+              inpFileName: $inpFileName
+            ) {
+              reply
+              modelId
+              inferenceProfileId
+              source
+              latencyMs
+              promptTokens
+              completionTokens
+              errorDetail
+              updatedInpContent
+              updatedInpFileName
+            }
+          }`,
+          {
+            messagesJson: JSON.stringify(preparedMessages),
+            systemPrompt: effectiveSystemPrompt,
+            temperature,
+            mode: "bedrock",
+            inpContent: compactInpForTransport,
+            inpFileName: activeInpFileName,
+          },
+          signal
+        );
+        if (gqlRes?.askGpt6Sol) {
+          data = gqlRes.askGpt6Sol;
+        }
+      } catch {
+        // Fallback to generateClient below
       }
-      data = response.data ?? null;
+
+      if (!data) {
+        const client = generateClient() as unknown as AskGpt6SolClient;
+        const response = await client.queries.askGpt6Sol({
+          messagesJson: JSON.stringify(preparedMessages),
+          systemPrompt: effectiveSystemPrompt,
+          temperature,
+          mode: "bedrock",
+          inpContent: compactInpForTransport,
+          inpFileName: activeInpFileName,
+        });
+
+        if (response.errors?.length) {
+          throw new Error(response.errors.map((e) => e.message).join("; "));
+        }
+        data = response.data ?? null;
+      }
     } else if (!data) {
       const localResp = await fetch("/api/bedrock-chat", {
         method: "POST",
